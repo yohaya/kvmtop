@@ -1,5 +1,4 @@
 #define _GNU_SOURCE
-// kvmtop - KVM Monitoring Tool - Sync
 #include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
@@ -48,12 +47,11 @@ typedef struct {
     uint64_t write_bytes;
     uint64_t cpu_jiffies;
     uint64_t blkio_ticks;
-    uint64_t start_time_ticks; // For uptime
+    uint64_t start_time_ticks;
     
     char state;
     char user[32];
 
-    // Memory (Pages)
     uint64_t mem_virt_pages;
     uint64_t mem_res_pages;
     uint64_t mem_shr_pages;
@@ -231,7 +229,7 @@ static int get_term_cols(void) {
 static void fprint_trunc(FILE *out, const char *s, int width) {
     if (width <= 0) return;
     int len = (int)strlen(s);
-    if (len <= width) fprintf(out, "%*s", width, s);
+    if (len <= width) fprintf(out, "%-*s", width, s);
     else if (width <= 3) fprintf(out, "%.*s", width, s);
     else fprintf(out, "%.*s...", width - 3, s);
 }
@@ -273,21 +271,18 @@ static int read_cmdline(pid_t pid, char out[CMD_MAX]) {
     char path[PATH_MAX], buf[8192];
     ssize_t n = 0;
     
-    // 1. Try /proc/[pid]/cmdline
     snprintf(path, sizeof(path), "/proc/%d/cmdline", pid);
     if (read_small_file(path, buf, sizeof(buf), &n) == 0 && n > 0) {
         sanitize_cmd(out, buf, (size_t)n);
         if (out[0] != '\0' && out[0] != ' ') return 0;
     }
 
-    // 2. Try /proc/[pid]/comm
     snprintf(path, sizeof(path), "/proc/%d/comm", pid);
     if (read_small_file(path, buf, sizeof(buf), &n) == 0 && n > 0) {
         sanitize_cmd(out, buf, (size_t)n); 
         if (out[0] != '\0' && out[0] != ' ') return 0;
     }
 
-    // 3. Try parsing name from /proc/[pid]/stat
     snprintf(path, sizeof(path), "/proc/%d/stat", pid);
     if (read_small_file(path, buf, sizeof(buf), &n) == 0 && n > 0) {
         char *start = strchr(buf, '(');
@@ -342,11 +337,6 @@ static int read_proc_stat_fields(const char *path, uint64_t *cpu_jiffies_out, ui
     *start_time_out = 0;
     
     while (tok) {
-        // idx 0 is state
-        // Field 14 (utime) -> idx 11.
-        // Field 15 (stime) -> idx 12.
-        // Field 22 (starttime) -> idx 19.
-        // Field 42 (blkio) -> idx 39.
         if (idx == 11) utime = strtoull(tok, NULL, 10); 
         else if (idx == 12) stime = strtoull(tok, NULL, 10);
         else if (idx == 19) *start_time_out = strtoull(tok, NULL, 10);
@@ -365,7 +355,6 @@ static void read_statm(pid_t pid, uint64_t *virt, uint64_t *res, uint64_t *shr) 
     snprintf(path, sizeof(path), "/proc/%d/statm", pid);
     char buf[256]; ssize_t n;
     if (read_small_file(path, buf, sizeof(buf), &n) == 0 && n > 0) {
-        // format: size resident shared ...
         unsigned long long v=0, r=0, s=0;
         if (sscanf(buf, "%llu %llu %llu", &v, &r, &s) >= 2) {
             *virt = v; *res = r; *shr = s;
@@ -605,7 +594,7 @@ static int collect_samples(vec_t *out, const pid_t *filter_pids, size_t filter_n
                 read_io_file(io_path, &s.syscr, &s.syscw, &s.read_bytes, &s.write_bytes);
                 read_proc_stat_fields(stat_path, &s.cpu_jiffies, &s.blkio_ticks, &s.state, &s.start_time_ticks);
                 read_statm(tid, &s.mem_virt_pages, &s.mem_res_pages, &s.mem_shr_pages);
-                get_proc_user(pid, s.user, sizeof(s.user)); // User comes from TGID usually
+                get_proc_user(pid, s.user, sizeof(s.user));
 
                 vec_push(out, &s);
             }
@@ -659,7 +648,7 @@ static int sort_desc = 1;
 typedef enum { 
     SORT_PID=1, SORT_CPU, SORT_LOG_R, SORT_LOG_W, SORT_WAIT, SORT_RMIB, SORT_WMIB,
     SORT_NET_RX, SORT_NET_TX,
-    SORT_MEM_RES, SORT_MEM_SHR, SORT_MEM_VIRT, SORT_USER, SORT_UPTIME // Add missing enums if needed or reuse
+    SORT_MEM_RES, SORT_MEM_SHR, SORT_MEM_VIRT, SORT_USER, SORT_UPTIME 
 } sort_col_t;
 
 // Helper macro for numeric comparison
@@ -716,148 +705,7 @@ static int cmp_disk_rio(const void *a, const void *b) {
     return CMP_NUM(x->r_iops, y->r_iops);
 }
 
-// ... (in main loop) ...
-
-                    switch(sort_col_proc) {
-                        case SORT_PID: qsort(view_list->data, view_list->len, sizeof(sample_t), cmp_pid); break;
-                        case SORT_CPU: qsort(view_list->data, view_list->len, sizeof(sample_t), cmp_cpu); break;
-                        case SORT_LOG_R: qsort(view_list->data, view_list->len, sizeof(sample_t), cmp_logr); break;
-                        case SORT_LOG_W: qsort(view_list->data, view_list->len, sizeof(sample_t), cmp_logw); break;
-                        case SORT_WAIT: qsort(view_list->data, view_list->len, sizeof(sample_t), cmp_wait); break;
-                        case SORT_RMIB: qsort(view_list->data, view_list->len, sizeof(sample_t), cmp_rmib); break;
-                        case SORT_WMIB: qsort(view_list->data, view_list->len, sizeof(sample_t), cmp_wmib); break;
-                        default: qsort(view_list->data, view_list->len, sizeof(sample_t), cmp_cpu); break;
-                    }
-
-                    // Column Widths
-                    int pidw = 10, userw = 10, uptimew=10, memw = 10;
-                    int logw=10, waitw=8, mibw=10, cpuw=8, statew=3;
-                    
-                    // Rearranged Headers
-                    // Order: PID, User, Uptime, Res, Shr, Virt, R_Log, W_Log, Wait, R_MiB, W_MiB, CPU, State, COMMAND
-                    
-                    printf("%*s %*s %*s %*s %*s %*s %*s %*s %*s %*s %*s %*s %*s %s\n",
-                        pidw, "[1] PID",
-                        userw, "User",
-                        uptimew, "Uptime",
-                        memw, "Res(MiB)",
-                        memw, "Shr(MiB)",
-                        memw, "Virt(MiB)",
-                        logw, "[3] R_Log",
-                        logw, "[4] W_Log",
-                        waitw, "[5] Wait",
-                        mibw, "[6] R_MiB",
-                        mibw, "[7] W_MiB",
-                        cpuw, "[2] CPU%",
-                        statew, "[8] S",
-                        "COMMAND LINE"
-                    );
-                    
-                    int fixed_width = pidw+1 + userw+1 + uptimew+1 + 
-                                      memw+1 + memw+1 + memw+1 + 
-                                      logw+1 + logw+1 + waitw+1 + 
-                                      mibw+1 + mibw+1 + 
-                                      cpuw+1 + statew+1;
-                    
-                    int cmdw = cols - fixed_width; 
-                    if (cmdw < 10) cmdw = 10;
-
-                    for(int i=0; i<cols; i++) putchar('-');
-                    putchar('\n');
-
-                    // Calc totals
-                    double t_cpu=0, t_ri=0, t_wi=0, t_rm=0, t_wm=0, t_wt=0;
-                    double t_res=0, t_shr=0, t_virt=0;
-                    
-                    for(size_t i=0; i<curr_raw.len; i++) {
-                        t_cpu += curr_raw.data[i].cpu_pct;
-                        t_ri  += curr_raw.data[i].r_iops;
-                        t_wi  += curr_raw.data[i].w_iops;
-                        t_rm  += curr_raw.data[i].r_mib;
-                        t_wm  += curr_raw.data[i].w_mib;
-                        t_wt  += curr_raw.data[i].io_wait_ms;
-                        
-                        t_res  += (double)curr_raw.data[i].mem_res_pages * 4096.0 / 1048576.0;
-                        t_shr  += (double)curr_raw.data[i].mem_shr_pages * 4096.0 / 1048576.0;
-                        t_virt += (double)curr_raw.data[i].mem_virt_pages * 4096.0 / 1048576.0;
-                    }
-
-                    int limit = display_limit; 
-                    if ((size_t)limit > view_list->len) limit = view_list->len;
-                    
-                    struct sysinfo si;
-                    sysinfo(&si);
-                    long uptime_sec = si.uptime;
-
-                    for (int i=0; i<limit; i++) {
-                        const sample_t *c = &view_list->data[i];
-                        char pidbuf[32];
-                        snprintf(pidbuf, sizeof(pidbuf), "%d", c->tgid);
-
-                        if (strlen(filter_str) > 0) {
-                             if (!strcasestr(c->cmd, filter_str) && !strcasestr(pidbuf, filter_str) && !strcasestr(c->user, filter_str)) continue;
-                        }
-                        
-                        double res_mib = (double)c->mem_res_pages * 4096.0 / 1048576.0;
-                        double shr_mib = (double)c->mem_shr_pages * 4096.0 / 1048576.0;
-                        double virt_mib = (double)c->mem_virt_pages * 4096.0 / 1048576.0;
-
-                        long proc_uptime = uptime_sec - (c->start_time_ticks / hz);
-                        char uptime_buf[32];
-                        int days = proc_uptime / 86400;
-                        int hrs = (proc_uptime % 86400) / 3600;
-                        int mins = (proc_uptime % 3600) / 60;
-                        int secs = proc_uptime % 60;
-                        if (days > 0) snprintf(uptime_buf, 32, "%dd%02dh", days, hrs);
-                        else snprintf(uptime_buf, 32, "%02d:%02d:%02d", hrs, mins, secs);
-
-                        printf("%*s %*s %*s %*.0f %*.0f %*.0f %*.*f %*.*f %*.*f %*.*f %*.*f %*.*f %*c ",
-                            pidw, pidbuf,
-                            userw, c->user,
-                            uptimew, uptime_buf,
-                            memw, res_mib,
-                            memw, shr_mib,
-                            memw, virt_mib,
-                            logw, 2, c->r_iops,
-                            logw, 2, c->w_iops,
-                            waitw, 2, c->io_wait_ms,
-                            mibw, 0, c->r_mib,
-                            mibw, 0, c->w_mib,
-                            cpuw, 2, c->cpu_pct,
-                            statew, c->state);
-                        fprint_trunc(stdout, c->cmd, cmdw);
-                        putchar('\n');
-
-                        if (show_tree) {
-                            // Tree indent - simplistic
-                            print_threads_for_tgid(&curr_raw, c->tgid, cols, pidw, cpuw, logw, waitw, mibw, cmdw);
-                        }
-                    }
-
-                    for(int i=0; i<cols; i++) putchar('-');
-                    putchar('\n');
-                    printf("%*s %*s %*s %*.0f %*.0f %*.0f %*.*f %*.*f %*.*f %*.*f %*.*f %*.*f\n",
-                            pidw, "TOTAL",
-                            userw, "",
-                            uptimew, "",
-                            memw, t_res,
-                            memw, t_shr,
-                            memw, t_virt,
-                            logw, 2, t_ri,
-                            logw, 2, t_wi,
-                            waitw, 2, t_wt,
-                            mibw, 0, t_rm,
-                            mibw, 0, t_wm,
-                            cpuw, 2, t_cpu);
-// ... (Key Handlers) ...
-                    if (c == '1' || c == 0x01) { if (sort_col_proc == SORT_PID) sort_desc = !sort_desc; else { sort_col_proc = SORT_PID; sort_desc = 1; } dirty = 1; }
-                    if (c == '2' || c == 0x02) { if (sort_col_proc == SORT_CPU) sort_desc = !sort_desc; else { sort_col_proc = SORT_CPU; sort_desc = 1; } dirty = 1; }
-                    if (c == '3' || c == 0x03) { if (sort_col_proc == SORT_LOG_R) sort_desc = !sort_desc; else { sort_col_proc = SORT_LOG_R; sort_desc = 1; } dirty = 1; }
-                    if (c == '4' || c == 0x04) { if (sort_col_proc == SORT_LOG_W) sort_desc = !sort_desc; else { sort_col_proc = SORT_LOG_W; sort_desc = 1; } dirty = 1; }
-                    if (c == '5' || c == 0x05) { if (sort_col_proc == SORT_WAIT) sort_desc = !sort_desc; else { sort_col_proc = SORT_WAIT; sort_desc = 1; } dirty = 1; }
-                    if (c == '6' || c == 0x06) { if (sort_col_proc == SORT_RMIB) sort_desc = !sort_desc; else { sort_col_proc = SORT_RMIB; sort_desc = 1; } dirty = 1; }
-                    if (c == '7' || c == 0x07) { if (sort_col_proc == SORT_WMIB) sort_desc = !sort_desc; else { sort_col_proc = SORT_WMIB; sort_desc = 1; } dirty = 1; }
-
+// Aggregate threads into process-level stats
 static void aggregate_by_tgid(const vec_t *src, vec_t *dst) {
     vec_init(dst);
     // 1. Deep copy
@@ -885,20 +733,13 @@ static void aggregate_by_tgid(const vec_t *src, vec_t *dst) {
                 dst->data[write_idx].io_wait_ms += dst->data[i].io_wait_ms;
                 dst->data[write_idx].r_mib += dst->data[i].r_mib;
                 dst->data[write_idx].w_mib += dst->data[i].w_mib;
-                // Add memory pages (RSS/Shared/Virt should be max or average? Usually process level is shared)
-                // Actually threads share memory. So we should NOT sum them if they are threads of same process.
-                // We should just take one.
-                // But since we copy, we overwrite or keep first?
-                // The memory stats in /proc/tid/statm are same as /proc/pid/statm for threads.
-                // So we just keep the value from the first one.
-                
-                // Keep the PID of the TGID
+                // Keep the PID of the TGID (usually the main thread) or just use TGID
                 dst->data[write_idx].pid = dst->data[write_idx].tgid; 
                 dst->data[write_idx].state = dst->data[i].state; 
             } else {
                 write_idx++;
                 dst->data[write_idx] = dst->data[i];
-                dst->data[write_idx].pid = dst->data[i].tgid; 
+                dst->data[write_idx].pid = dst->data[i].tgid; // Ensure PID column shows TGID
             }
         }
         dst->len = write_idx + 1;
@@ -911,7 +752,7 @@ static void print_threads_for_tgid(const vec_t *raw, pid_t tgid, int cols, int p
         const sample_t *s = &raw->data[i];
         if (s->tgid == tgid && s->pid != tgid) { 
             char pidbuf[32];
-            snprintf(pidbuf, sizeof(pidbuf), "  └─ %d", s->pid); 
+            snprintf(pidbuf, sizeof(pidbuf), "  └─ %d", s->pid); // Indent
             
             printf("%*s %*.*f %*.*f %*.*f %*.*f %*.*f %*.*f %c ",
                 pidw, pidbuf,
@@ -1136,7 +977,7 @@ int main(int argc, char **argv) {
                 printf("System IOPS: Read %.0f | Write %.0f\n", sys_r_iops, sys_w_iops);
 
                 if (mode == MODE_NETWORK) {
-                    if (sort_col_net == SORT_NET_RX) 
+                    if (sort_col_net == SORT_NET_RX)
                         qsort(curr_net.data, curr_net.len, sizeof(net_iface_t), cmp_net_rx);
                     else
                         qsort(curr_net.data, curr_net.len, sizeof(net_iface_t), cmp_net_tx);
@@ -1195,6 +1036,7 @@ int main(int argc, char **argv) {
 
                     for (size_t i=0; i<curr_disk.len; i++) {
                         const disk_sample_t *d = &curr_disk.data[i];
+                        // Filter
                         if (strlen(filter_str) > 0 && !strcasestr(d->name, filter_str)) continue;
 
                         printf("%*s %*.*f %*.*f %*.*f %*.*f\n",
@@ -1219,41 +1061,45 @@ int main(int argc, char **argv) {
                     }
 
                     // Column Widths
-                    int pidw = 10, cpuw = 8, memw = 10, userw = 10, uptimew=10, statew = 3, iopsw=10, waitw=8, mibw=10;
+                    int pidw = 10, userw = 10, uptimew=10, memw = 10;
+                    int logw=10, waitw=8, mibw=10, cpuw=8, statew=3;
                     
-                    // Headers
-                    int fixed_width = pidw + 1 + cpuw + 1 + 
-                                      memw + 1 + memw + 1 + memw + 1 + 
-                                      uptimew + 1 + userw + 1 + 
-                                      iopsw + 1 + iopsw + 1 + 
-                                      waitw + 1 + 
-                                      mibw + 1 + mibw + 1 + 
-                                      statew + 1;
-                                      
-                    int cmdw = cols - fixed_width; 
-                    if (cmdw < 10) cmdw = 10;
-
+                    // Rearranged Headers
+                    // Order: PID, User, Uptime, Res, Shr, Virt, R_Log, W_Log, Wait, R_MiB, W_MiB, CPU, State, COMMAND
+                    
                     printf("%*s %*s %*s %*s %*s %*s %*s %*s %*s %*s %*s %*s %*s %s\n",
                         pidw, "[1] PID",
-                        cpuw, "[2] CPU%",
+                        userw, "User",
+                        uptimew, "Uptime",
                         memw, "Res(MiB)",
                         memw, "Shr(MiB)",
                         memw, "Virt(MiB)",
-                        uptimew, "Uptime",
-                        userw, "User",
-                        iopsw, "[3] R_Log",
-                        iopsw, "[4] W_Log",
+                        logw, "[3] R_Log",
+                        logw, "[4] W_Log",
                         waitw, "[5] Wait",
                         mibw, "[6] R_MiB",
                         mibw, "[7] W_MiB",
+                        cpuw, "[2] CPU%",
                         statew, "[8] S",
                         "COMMAND LINE"
                     );
                     
-                    for(int i=0; i<cols; i++) putchar('-'); putchar('\n');
+                    int fixed_width = pidw+1 + userw+1 + uptimew+1 + 
+                                      memw+1 + memw+1 + memw+1 + 
+                                      logw+1 + logw+1 + waitw+1 + 
+                                      mibw+1 + mibw+1 + 
+                                      cpuw+1 + statew+1;
+                    
+                    int cmdw = cols - fixed_width; 
+                    if (cmdw < 10) cmdw = 10;
 
-                    // Calc totals if needed
+                    for(int i=0; i<cols; i++) putchar('-');
+                    putchar('\n');
+
+                    // Calc totals
                     double t_cpu=0, t_ri=0, t_wi=0, t_rm=0, t_wm=0, t_wt=0;
+                    double t_res=0, t_shr=0, t_virt=0;
+                    
                     for(size_t i=0; i<curr_raw.len; i++) {
                         t_cpu += curr_raw.data[i].cpu_pct;
                         t_ri  += curr_raw.data[i].r_iops;
@@ -1261,6 +1107,10 @@ int main(int argc, char **argv) {
                         t_rm  += curr_raw.data[i].r_mib;
                         t_wm  += curr_raw.data[i].w_mib;
                         t_wt  += curr_raw.data[i].io_wait_ms;
+                        
+                        t_res  += (double)curr_raw.data[i].mem_res_pages * 4096.0 / 1048576.0;
+                        t_shr  += (double)curr_raw.data[i].mem_shr_pages * 4096.0 / 1048576.0;
+                        t_virt += (double)curr_raw.data[i].mem_virt_pages * 4096.0 / 1048576.0;
                     }
 
                     int limit = display_limit; 
@@ -1275,18 +1125,14 @@ int main(int argc, char **argv) {
                         char pidbuf[32];
                         snprintf(pidbuf, sizeof(pidbuf), "%d", c->tgid);
 
-                        // FILTER CHECK
                         if (strlen(filter_str) > 0) {
                              if (!strcasestr(c->cmd, filter_str) && !strcasestr(pidbuf, filter_str) && !strcasestr(c->user, filter_str)) continue;
                         }
                         
-                        // Memory (Pages -> MiB)
-                        // Page size 4096. 4096 / 1024 / 1024 = 1/256
                         double res_mib = (double)c->mem_res_pages * 4096.0 / 1048576.0;
                         double shr_mib = (double)c->mem_shr_pages * 4096.0 / 1048576.0;
                         double virt_mib = (double)c->mem_virt_pages * 4096.0 / 1048576.0;
 
-                        // Uptime
                         long proc_uptime = uptime_sec - (c->start_time_ticks / hz);
                         char uptime_buf[32];
                         int days = proc_uptime / 86400;
@@ -1296,113 +1142,52 @@ int main(int argc, char **argv) {
                         if (days > 0) snprintf(uptime_buf, 32, "%dd%02dh", days, hrs);
                         else snprintf(uptime_buf, 32, "%02d:%02d:%02d", hrs, mins, secs);
 
-                        printf("%*s %*.*f %*.*f %*.*f %*.*f %*s %*s %*.*f %*.*f %*.*f %*.*f %*.*f %*c ",
+                        printf("%*s %*s %*s %*.0f %*.0f %*.0f %*.*f %*.*f %*.*f %*.*f %*.*f %*.*f %*c ",
                             pidw, pidbuf,
-                            cpuw, 2, c->cpu_pct,
-                            memw, 1, res_mib,
-                            memw, 1, shr_mib,
-                            memw, 1, virt_mib,
-                            uptimew, uptime_buf,
                             userw, c->user,
-                            iopsw, 2, c->r_iops,
-                            iopsw, 2, c->w_iops,
+                            uptimew, uptime_buf,
+                            memw, res_mib,
+                            memw, shr_mib,
+                            memw, virt_mib,
+                            logw, 2, c->r_iops,
+                            logw, 2, c->w_iops,
                             waitw, 2, c->io_wait_ms,
-                            mibw, 2, c->r_mib,
-                            mibw, 2, c->w_mib,
+                            mibw, 0, c->r_mib,
+                            mibw, 0, c->w_mib,
+                            cpuw, 2, c->cpu_pct,
                             statew, c->state);
                         fprint_trunc(stdout, c->cmd, cmdw);
                         putchar('\n');
 
                         if (show_tree) {
-                            print_threads_for_tgid(&curr_raw, c->tgid, cols, pidw, cpuw, iopsw, waitw, mibw, cmdw); // Tree alignment needs fix if we added cols!
-                            // For tree, we just indent. The helper function needs update to match columns?
-                            // Actually, print_threads_for_tgid uses fixed arguments. I need to update it or it will misalign.
-                            // I'll update it to just print some info indented.
+                            // Tree indent - simplistic
+                            print_threads_for_tgid(&curr_raw, c->tgid, cols, pidw, cpuw, logw, waitw, mibw, cmdw);
                         }
                     }
 
-                    for(int i=0; i<cols; i++) putchar('-'); putchar('\n');
-                    printf("%*s %*.*f \n",
+                    for(int i=0; i<cols; i++) putchar('-');
+                    putchar('\n');
+                    printf("%*s %*s %*s %*.0f %*.0f %*.0f %*.*f %*.*f %*.*f %*.*f %*.*f %*.*f\n",
                             pidw, "TOTAL",
+                            userw, "",
+                            uptimew, "",
+                            memw, t_res,
+                            memw, t_shr,
+                            memw, t_virt,
+                            logw, 2, t_ri,
+                            logw, 2, t_wi,
+                            waitw, 2, t_wt,
+                            mibw, 0, t_rm,
+                            mibw, 0, t_wm,
                             cpuw, 2, t_cpu);
-                }
-                fflush(stdout);
-                dirty = 0;
-            }
-
-            double elapsed = now_monotonic() - start_wait;
-            double remain = interval - elapsed;
-            if (remain <= 0) break;
-
-            int c = wait_for_input(remain);
-            if (c > 0) {
-                if (in_filter_mode) {
-                    if (c == 27) { // ESC
-                        in_filter_mode = 0;
-                        filter_str[0] = '\0';
-                        dirty = 1;
-                    } else if (c == 127 || c == 8) { // Backspace
-                        size_t len = strlen(filter_str);
-                        if (len > 0) filter_str[len-1] = '\0';
-                        dirty = 1;
-                    } else if (c == '\n' || c == '\r') {
-                        in_filter_mode = 0;
-                        dirty = 1;
-                    } else if (isprint(c)) {
-                        size_t len = strlen(filter_str);
-                        if (len < sizeof(filter_str)-1) {
-                            filter_str[len] = (char)c;
-                            filter_str[len+1] = '\0';
-                        }
-                        dirty = 1;
-                    }
-                } else if (in_limit_mode) {
-                    if (c == 27) { // ESC
-                        in_limit_mode = 0;
-                        limit_str[0] = '\0';
-                        dirty = 1;
-                    } else if (c == 127 || c == 8) {
-                        size_t len = strlen(limit_str);
-                        if (len > 0) limit_str[len-1] = '\0';
-                        dirty = 1;
-                    } else if (c == '\n' || c == '\r') {
-                        if (strlen(limit_str) > 0) {
-                            int val = atoi(limit_str);
-                            if (val > 0) display_limit = val;
-                        }
-                        in_limit_mode = 0;
-                        limit_str[0] = '\0';
-                        dirty = 1;
-                    } else if (isdigit(c)) {
-                        size_t len = strlen(limit_str);
-                        if (len < sizeof(limit_str)-1) {
-                            limit_str[len] = (char)c;
-                            limit_str[len+1] = '\0';
-                        }
-                        dirty = 1;
-                    }
-                } else {
-                    if (c == '/') { in_filter_mode = 1; dirty = 1; }
-                    if (c == 'l' || c == 'L') { in_limit_mode = 1; limit_str[0]='\0'; dirty = 1; }
-                    if (c == 'q' || c == 'Q') goto cleanup;
-                    if (c == 'f' || c == 'F') { frozen = !frozen; dirty = 1; }
-                    if (c == 't' || c == 'T') { show_tree = !show_tree; mode = MODE_PROCESS; dirty = 1; }
-                    if (c == 'n' || c == 'N') { mode = MODE_NETWORK; dirty = 1; }
-                    if (c == 'c' || c == 'C') { mode = MODE_PROCESS; dirty = 1; }
-                    if (c == 's' || c == 'S') { mode = MODE_STORAGE; dirty = 1; }
                     
-                    if (mode == MODE_PROCESS) {
-                        if (c == '1' || c == 0x01) { sort_col_proc = SORT_PID; dirty = 1; }
-                        if (c == '2' || c == 0x02) { sort_col_proc = SORT_CPU; dirty = 1; }
-                        if (c == '3' || c == 0x03) { sort_col_proc = SORT_LOG_R; dirty = 1; }
-                        if (c == '4' || c == 0x04) { sort_col_proc = SORT_LOG_W; dirty = 1; }
-                        if (c == '5' || c == 0x05) { sort_col_proc = SORT_WAIT; dirty = 1; }
-                        if (c == '6' || c == 0x06) { sort_col_proc = SORT_RMIB; dirty = 1; }
-                        if (c == '7' || c == 0x07) { sort_col_proc = SORT_WMIB; dirty = 1; }
-                    } else { // MODE_NETWORK
-                        if (c == '1' || c == 0x01) { sort_col_net = SORT_NET_RX; dirty = 1; }
-                        if (c == '2' || c == 0x02) { sort_col_net = SORT_NET_TX; dirty = 1; }
-                    }
+                    if (c == '1' || c == 0x01) { if (sort_col_proc == SORT_PID) sort_desc = !sort_desc; else { sort_col_proc = SORT_PID; sort_desc = 1; } dirty = 1; }
+                    if (c == '2' || c == 0x02) { if (sort_col_proc == SORT_CPU) sort_desc = !sort_desc; else { sort_col_proc = SORT_CPU; sort_desc = 1; } dirty = 1; }
+                    if (c == '3' || c == 0x03) { if (sort_col_proc == SORT_LOG_R) sort_desc = !sort_desc; else { sort_col_proc = SORT_LOG_R; sort_desc = 1; } dirty = 1; }
+                    if (c == '4' || c == 0x04) { if (sort_col_proc == SORT_LOG_W) sort_desc = !sort_desc; else { sort_col_proc = SORT_LOG_W; sort_desc = 1; } dirty = 1; }
+                    if (c == '5' || c == 0x05) { if (sort_col_proc == SORT_WAIT) sort_desc = !sort_desc; else { sort_col_proc = SORT_WAIT; sort_desc = 1; } dirty = 1; }
+                    if (c == '6' || c == 0x06) { if (sort_col_proc == SORT_RMIB) sort_desc = !sort_desc; else { sort_col_proc = SORT_RMIB; sort_desc = 1; } dirty = 1; }
+                    if (c == '7' || c == 0x07) { if (sort_col_proc == SORT_WMIB) sort_desc = !sort_desc; else { sort_col_proc = SORT_WMIB; sort_desc = 1; } dirty = 1; }
                 }
             }
         }
