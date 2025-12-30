@@ -510,7 +510,10 @@ static const sample_t *find_prev(const vec_t *prev, uint64_t key) {
 }
 
 // Sort Comparators
-typedef enum { SORT_PID=1, SORT_CPU, SORT_LOG_R, SORT_LOG_W, SORT_WAIT, SORT_RMIB, SORT_WMIB } sort_col_t;
+typedef enum { 
+    SORT_PID=1, SORT_CPU, SORT_LOG_R, SORT_LOG_W, SORT_WAIT, SORT_RMIB, SORT_WMIB,
+    SORT_NET_RX, SORT_NET_TX
+} sort_col_t;
 
 static int cmp_pid_desc(const void *a, const void *b) {
     const sample_t *x = (const sample_t *)a;
@@ -546,6 +549,16 @@ static int cmp_wmib_desc(const void *a, const void *b) {
     const sample_t *x = (const sample_t *)a;
     const sample_t *y = (const sample_t *)b;
     return (x->w_mib < y->w_mib) - (x->w_mib > y->w_mib);
+}
+static int cmp_net_rx_desc(const void *a, const void *b) {
+    const net_iface_t *x = (const net_iface_t *)a;
+    const net_iface_t *y = (const net_iface_t *)b;
+    return (x->rx_mbps < y->rx_mbps) - (x->rx_mbps > y->rx_mbps);
+}
+static int cmp_net_tx_desc(const void *a, const void *b) {
+    const net_iface_t *x = (const net_iface_t *)a;
+    const net_iface_t *y = (const net_iface_t *)b;
+    return (x->tx_mbps < y->tx_mbps) - (x->tx_mbps > y->tx_mbps);
 }
 
 // Aggregate threads into process-level stats
