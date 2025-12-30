@@ -22,4 +22,4 @@ The output binary `kvmtop` will be created in the `build/` directory.
 ```
 
 ## License
-MIT
+GPLv3
