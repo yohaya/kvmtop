@@ -30,6 +30,9 @@ typedef struct {
 
     uint64_t cpu_jiffies; // utime+stime in USER_HZ ticks
 
+    // Calculated fields
+    double cpu_pct;
+
     char cmd[CMD_MAX];
 } sample_t;
 
@@ -154,33 +157,6 @@ static int read_cmdline(pid_t pid, char out[CMD_MAX]) {
     return -1;
 }
 
-static int read_io_file(const char *path,
-                        uint64_t *syscr, uint64_t *syscw,
-                        uint64_t *read_bytes, uint64_t *write_bytes) {
-    FILE *f = fopen(path, "r");
-    if (!f) return -1;
-
-    uint64_t v_syscr = 0, v_syscw = 0, v_rbytes = 0, v_wbytes = 0;
-    char line[256];
-    while (fgets(line, sizeof(line), f)) {
-        char key[64];
-        unsigned long long val = 0;
-        if (sscanf(line, "%63[^:]: %llu", key, &val) == 2) {
-            if (strcmp(key, "syscr") == 0) v_syscr = (uint64_t)val;
-            else if (strcmp(key, "syscw") == 0) v_syscw = (uint64_t)val;
-            else if (strcmp(key, "read_bytes") == 0) v_rbytes = (uint64_t)val;
-            else if (strcmp(key, "write_bytes") == 0) v_wbytes = (uint64_t)val;
-        }
-    }
-
-    fclose(f);
-    *syscr = v_syscr;
-    *syscw = v_syscw;
-    *read_bytes = v_rbytes;
-    *write_bytes = v_wbytes;
-    return 0;
-}
-
 static int read_cpu_jiffies_from_stat(const char *path, uint64_t *cpu_jiffies_out) {
     char buf[4096];
     ssize_t n = 0;
@@ -256,14 +232,10 @@ static int collect_samples(vec_t *out, int include_threads,
             s.key = make_key(pid, pid);
             snprintf(s.cmd, sizeof(s.cmd), "%s", cmd);
 
-            char io_path[PATH_MAX];
             char stat_path[PATH_MAX];
-            snprintf(io_path, sizeof(io_path), "/proc/%d/io", pid);
             snprintf(stat_path, sizeof(stat_path), "/proc/%d/stat", pid);
 
-            if (read_io_file(io_path, &s.syscr, &s.syscw, &s.read_bytes, &s.write_bytes) != 0) {
-                continue;
-            }
+            // We only need CPU stats now
             if (read_cpu_jiffies_from_stat(stat_path, &s.cpu_jiffies) != 0) {
                 continue;
             }
@@ -289,14 +261,9 @@ static int collect_samples(vec_t *out, int include_threads,
                 s.key = make_key(pid, tid);
                 snprintf(s.cmd, sizeof(s.cmd), "%s", cmd);
 
-                char io_path[PATH_MAX];
                 char stat_path[PATH_MAX];
-                snprintf(io_path, sizeof(io_path), "/proc/%d/task/%d/io", pid, tid);
                 snprintf(stat_path, sizeof(stat_path), "/proc/%d/task/%d/stat", pid, tid);
 
-                if (read_io_file(io_path, &s.syscr, &s.syscw, &s.read_bytes, &s.write_bytes) != 0) {
-                    continue;
-                }
                 if (read_cpu_jiffies_from_stat(stat_path, &s.cpu_jiffies) != 0) {
                     continue;
                 }
@@ -311,11 +278,21 @@ static int collect_samples(vec_t *out, int include_threads,
     return 0;
 }
 
+// Comparator for KEY (used for lookups)
 static int cmp_key(const void *a, const void *b) {
     const sample_t *x = (const sample_t *)a;
     const sample_t *y = (const sample_t *)b;
     if (x->key < y->key) return -1;
     if (x->key > y->key) return 1;
+    return 0;
+}
+
+// Comparator for CPU% Descending
+static int cmp_cpu_desc(const void *a, const void *b) {
+    const sample_t *x = (const sample_t *)a;
+    const sample_t *y = (const sample_t *)b;
+    if (x->cpu_pct > y->cpu_pct) return -1;
+    if (x->cpu_pct < y->cpu_pct) return 1;
     return 0;
 }
 
@@ -359,21 +336,18 @@ static void fprint_trunc(FILE *out, const char *s, int width) {
 static void usage(const char *argv0) {
     fprintf(stderr,
         "Usage: %s [options]\n\n"
-        "Aligned table of per-process (or per-thread) CPU and I/O rates using /proc.\n\n"
-        "Columns: PID, CPU%%, read IOPS, write IOPS, read MiB/s, write MiB/s, command line\n\n"
+        "Displays top 20 processes sorted by CPU usage.\n\n"
         "Options:\n"
         "  -i, --interval SEC   Sampling interval in seconds (default 1.0)\n"
-        "  -n, --samples N      Number of samples to print (default infinite)\n"
         "  -p, --pid PID        Monitor only this PID (repeatable)\n"
-        "  -t, --threads        Show threads too (PID:TID in first column)\n"
+        "  -t, --threads        Show threads too\n"
         "  -h, --help           Show this help\n",
         argv0);
 }
 
 int main(int argc, char **argv) {
-    printf("kvmtop (static build) starting...\n");
+    fprintf(stderr, "kvmtop (static build) starting...\n");
     double interval = 1.0;
-    long samples = -1;
     int include_threads = 0;
 
     pid_t *filter = NULL;
@@ -381,7 +355,6 @@ int main(int argc, char **argv) {
 
     static const struct option long_opts[] = {
         {"interval", required_argument, NULL, 'i'},
-        {"samples", required_argument, NULL, 'n'},
         {"pid", required_argument, NULL, 'p'},
         {"threads", no_argument, NULL, 't'},
         {"help", no_argument, NULL, 'h'},
@@ -389,20 +362,12 @@ int main(int argc, char **argv) {
     };
 
     int opt;
-    while ((opt = getopt_long(argc, argv, "i:n:p:th", long_opts, NULL)) != -1) {
+    while ((opt = getopt_long(argc, argv, "i:p:th", long_opts, NULL)) != -1) {
         switch (opt) {
             case 'i': {
                 interval = strtod(optarg, NULL);
                 if (interval <= 0) {
                     fprintf(stderr, "interval must be > 0\n");
-                    return 2;
-                }
-                break;
-            }
-            case 'n': {
-                samples = strtol(optarg, NULL, 10);
-                if (samples < 0) {
-                    fprintf(stderr, "samples must be >= 0\n");
                     return 2;
                 }
                 break;
@@ -442,112 +407,96 @@ int main(int argc, char **argv) {
         return 2;
     }
 
-    // Fixed column widths (table-like)
-    const int pidw  = include_threads ? 11 : 7;  // e.g. 12345:12345
-    const int cpuw  = 8;   // 100.00
-    const int iopsw = 10;  // 12345.67
-    const int mibw  = 10;  // 12345.67
-
     vec_t prev, curr;
     vec_init(&prev);
     vec_init(&curr);
 
+    // Initial collection
     if (collect_samples(&prev, include_threads, filter, filter_n) != 0) {
         fprintf(stderr, "Failed to collect samples\n");
         return 2;
     }
+    // Sort 'prev' by key for lookup
     qsort(prev.data, prev.len, sizeof(prev.data[0]), cmp_key);
     double t_prev = now_monotonic();
 
-    // Header (fits terminal width; command column uses remaining space)
-    int cols = get_term_cols();
-    int fixed = pidw + 1 + cpuw + 1 + iopsw + 1 + iopsw + 1 + mibw + 1 + mibw + 1;
-    int cmdw = cols - fixed;
-    if (cmdw < 10) cmdw = 10;
+    // Column widths
+    const int pidw = include_threads ? 11 : 7;
+    const int cpuw = 8;
 
-    const char *pid_hdr = include_threads ? "PID:TID" : "PID";
-
-    printf("%*s %*s %*s %*s %*s %*s ",
-           pidw, pid_hdr,
-           cpuw, "CPU%",
-           iopsw, "R_IOPS",
-           iopsw, "W_IOPS",
-           mibw, "R_MiB/s",
-           mibw, "W_MiB/s");
-    fprint_trunc(stdout, "COMMAND", cmdw);
-    printf("\n");
-
-    int totalw = fixed + cmdw;
-    for (int i = 0; i < totalw; i++) putchar('-');
-    putchar('\n');
+    // Header
+    printf("\033[2J\033[H"); // Clear screen (optional, but nice for top-like tools)
     fflush(stdout);
 
-    long emitted = 0;
-    while (samples < 0 || emitted < samples) {
+    while (1) {
         sleep_seconds(interval);
 
         vec_free(&curr);
         vec_init(&curr);
 
-        (void)collect_samples(&curr, include_threads, filter, filter_n);
-        qsort(curr.data, curr.len, sizeof(curr.data[0]), cmp_key);
+        if (collect_samples(&curr, include_threads, filter, filter_n) != 0) {
+            break;
+        }
 
+        // Calculate CPU for everyone
         double t_curr = now_monotonic();
         double dt = t_curr - t_prev;
         if (dt <= 0) dt = interval;
 
-        // Recompute cmd column width in case terminal resized
-        cols = get_term_cols();
-        fixed = pidw + 1 + cpuw + 1 + iopsw + 1 + iopsw + 1 + mibw + 1 + mibw + 1;
-        cmdw = cols - fixed;
-        if (cmdw < 10) cmdw = 10;
-
         for (size_t i = 0; i < curr.len; i++) {
-            const sample_t *c = &curr.data[i];
+            sample_t *c = &curr.data[i];
             const sample_t *p = find_prev(&prev, c->key);
 
-            uint64_t d_syscr = 0, d_syscw = 0, d_rbytes = 0, d_wbytes = 0, d_cpu = 0;
+            uint64_t d_cpu = 0;
             if (p) {
-                d_syscr  = (c->syscr >= p->syscr) ? (c->syscr - p->syscr) : 0;
-                d_syscw  = (c->syscw >= p->syscw) ? (c->syscw - p->syscw) : 0;
-                d_rbytes = (c->read_bytes >= p->read_bytes) ? (c->read_bytes - p->read_bytes) : 0;
-                d_wbytes = (c->write_bytes >= p->write_bytes) ? (c->write_bytes - p->write_bytes) : 0;
-                d_cpu    = (c->cpu_jiffies >= p->cpu_jiffies) ? (c->cpu_jiffies - p->cpu_jiffies) : 0;
+                d_cpu = (c->cpu_jiffies >= p->cpu_jiffies) ? (c->cpu_jiffies - p->cpu_jiffies) : 0;
             }
+            c->cpu_pct = ((double)d_cpu * 100.0) / (dt * (double)hz);
+        }
 
-            // CPU% is relative to a single CPU (can exceed 100.00 for multi-threaded processes)
-            double cpu_pct = p ? ((double)d_cpu * 100.0) / (dt * (double)hz) : 0.0;
+        // Sort by CPU Descending
+        qsort(curr.data, curr.len, sizeof(sample_t), cmp_cpu_desc);
 
-            double r_iops  = (double)d_syscr / dt;
-            double w_iops  = (double)d_syscw / dt;
+        // Display
+        printf("\033[2J\033[H"); // Clear screen
+        int cols = get_term_cols();
+        
+        // Header
+        int cmdw = cols - (pidw + 1 + cpuw + 1);
+        if (cmdw < 10) cmdw = 10;
 
-            // Always show MiB/s
-            double r_mib_s = ((double)d_rbytes / dt) / (1024.0 * 1024.0);
-            double w_mib_s = ((double)d_wbytes / dt) / (1024.0 * 1024.0);
+        printf("%*s %*s ", pidw, "PID", cpuw, "CPU%%");
+        fprint_trunc(stdout, "COMMAND", cmdw);
+        printf("\n");
+        
+        for (int i=0; i<cols; i++) putchar('-');
+        putchar('\n');
 
+        int limit = 20;
+        if ((size_t)limit > curr.len) limit = (int)curr.len;
+
+        for (int i = 0; i < limit; i++) {
+            const sample_t *c = &curr.data[i];
             char pidbuf[32];
             if (include_threads) snprintf(pidbuf, sizeof(pidbuf), "%d:%d", (int)c->pid, (int)c->tid);
             else snprintf(pidbuf, sizeof(pidbuf), "%d", (int)c->pid);
 
-            printf("%*s %*.*f %*.*f %*.*f %*.*f %*.*f ",
+            printf("%*s %*.*f ",
                    pidw, pidbuf,
-                   cpuw, 2, cpu_pct,
-                   iopsw, 2, r_iops,
-                   iopsw, 2, w_iops,
-                   mibw, 2, r_mib_s,
-                   mibw, 2, w_mib_s);
+                   cpuw, 2, c->cpu_pct);
             fprint_trunc(stdout, c->cmd, cmdw);
             putchar('\n');
         }
-
-        putchar('\n');
         fflush(stdout);
+
+        // Prepare for next frame
+        // curr must be sorted by KEY to serve as 'prev' in next iteration
+        qsort(curr.data, curr.len, sizeof(sample_t), cmp_key);
 
         vec_free(&prev);
         prev = curr;
-        vec_init(&curr);
+        vec_init(&curr); // reset curr so it's fresh for next loop
         t_prev = t_curr;
-        emitted++;
     }
 
     vec_free(&prev);
