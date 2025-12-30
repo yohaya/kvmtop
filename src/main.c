@@ -188,7 +188,7 @@ static int get_term_cols(void) {
 static void fprint_trunc(FILE *out, const char *s, int width) {
     if (width <= 0) return;
     int len = (int)strlen(s);
-    if (len <= width) fprintf(out, "%-*s", width, s);
+    if (len <= width) fprintf(out, "%*-s", width, s);
     else if (width <= 3) fprintf(out, "%.*s", width, s);
     else fprintf(out, "%.*s...", width - 3, s);
 }
@@ -371,16 +371,21 @@ static void map_kvm_interfaces(vec_net_t *nets) {
     DIR *proc = opendir("/proc");
     if (!proc) return;
     struct dirent *de;
+    
+    // Large buffer for KVM cmdlines
+    static char cmd[131072]; 
+
     while ((de = readdir(proc)) != NULL) {
         if (!is_numeric_str(de->d_name)) continue;
         pid_t pid = atoi(de->d_name);
-        char cmd[CMD_MAX*4];
+        
         char path[256];
         snprintf(path, sizeof(path), "/proc/%d/cmdline", pid);
         
         ssize_t n;
         if (read_small_file(path, cmd, sizeof(cmd), &n) != 0) continue;
         
+        // Convert NULs to spaces
         for (ssize_t i=0; i<n; i++) if (cmd[i]=='\0') cmd[i]=' ';
         cmd[n-1]='\0';
 
@@ -592,11 +597,12 @@ static void aggregate_by_tgid(const vec_t *src, vec_t *dst) {
                 dst->data[write_idx].io_wait_ms += dst->data[i].io_wait_ms;
                 dst->data[write_idx].r_mib += dst->data[i].r_mib;
                 dst->data[write_idx].w_mib += dst->data[i].w_mib;
+                // Keep the PID of the TGID (usually the main thread) or just use TGID
                 dst->data[write_idx].pid = dst->data[write_idx].tgid; 
             } else {
                 write_idx++;
                 dst->data[write_idx] = dst->data[i];
-                dst->data[write_idx].pid = dst->data[i].tgid; 
+                dst->data[write_idx].pid = dst->data[i].tgid; // Ensure PID column shows TGID
             }
         }
         dst->len = write_idx + 1;
@@ -609,7 +615,7 @@ static void print_threads_for_tgid(const vec_t *raw, pid_t tgid, int cols, int p
         const sample_t *s = &raw->data[i];
         if (s->tgid == tgid && s->pid != tgid) { 
             char pidbuf[32];
-            snprintf(pidbuf, sizeof(pidbuf), "  └─ %d", s->pid); 
+            snprintf(pidbuf, sizeof(pidbuf), "  └─ %d", s->pid); // Indent
             
             printf("%*s %*.*f %*.*f %*.*f %*.*f %*.*f %*.*f ",
                 pidw, pidbuf,
@@ -684,7 +690,8 @@ int main(int argc, char **argv) {
     double t_prev = now_monotonic();
 
     enable_raw_mode();
-    sort_col_t sort_col = SORT_CPU;
+    sort_col_t sort_col_proc = SORT_CPU;
+    sort_col_t sort_col_net = SORT_NET_TX;
 
     while (1) {
         vec_free(&curr_raw); vec_init(&curr_raw);
@@ -773,16 +780,26 @@ int main(int argc, char **argv) {
                 printf("System IOPS: Read %.0f | Write %.0f\n", sys_r_iops, sys_w_iops);
 
                 if (mode == MODE_NETWORK) {
+                    if (sort_col_net == SORT_NET_RX) 
+                        qsort(curr_net.data, curr_net.len, sizeof(net_iface_t), cmp_net_rx_desc);
+                    else
+                        qsort(curr_net.data, curr_net.len, sizeof(net_iface_t), cmp_net_tx_desc);
+
                     int namew=16, statw=6, ratew=12, pktw=10, errw=8;
+                    char h_rx[32], h_tx[32];
+                    snprintf(h_rx, 32, "[1] %s", "RX_Mbps");
+                    snprintf(h_tx, 32, "[2] %s", "TX_Mbps");
+
                     printf("%*s %*s %*s %*s %*s %*s %*s %*s %-6s %s\n",
                         namew, "IFACE", statw, "STATE", 
-                        ratew, "RX_Mbps", ratew, "TX_Mbps",
+                        ratew, h_rx, ratew, h_tx,
                         pktw, "RX_Pkts", pktw, "TX_Pkts",
                         errw, "RX_Err", errw, "TX_Err",
                         "VMID", "VM_NAME");
                     for(int i=0; i<cols; i++) putchar('-'); putchar('\n');
 
-                    for(size_t i=0; i<curr_net.len; i++) {
+                    int count = 0;
+                    for(size_t i=0; i<curr_net.len && count < 25; i++) {
                         net_iface_t *n = &curr_net.data[i];
                         if (strncmp(n->name, "fw", 2) == 0 || strcmp(n->name, "lo")==0) continue;
 
@@ -795,11 +812,12 @@ int main(int argc, char **argv) {
                             pktw, 0, n->rx_pps, pktw, 0, n->tx_pps,
                             errw, 0, n->rx_errs_ps, errw, 0, n->tx_errs_ps,
                             vmid_buf, n->vm_name);
+                        count++;
                     }
-                } else {
+                } else { // MODE_PROCESS
                     vec_t *view_list = &curr_proc; 
 
-                    switch(sort_col) {
+                    switch(sort_col_proc) {
                         case SORT_PID: qsort(view_list->data, view_list->len, sizeof(sample_t), cmp_pid_desc); break;
                         case SORT_CPU: qsort(view_list->data, view_list->len, sizeof(sample_t), cmp_cpu_desc); break;
                         case SORT_LOG_R: qsort(view_list->data, view_list->len, sizeof(sample_t), cmp_logr_desc); break;
@@ -891,15 +909,19 @@ int main(int argc, char **argv) {
                 if (c == 'q' || c == 'Q') goto cleanup;
                 if (c == 't' || c == 'T') { show_tree = !show_tree; dirty = 1; }
                 if (c == 'n' || c == 'N') { mode = (mode == MODE_NETWORK) ? MODE_PROCESS : MODE_NETWORK; dirty = 1; }
-                if (c == '1' || c == 0x01) { sort_col = SORT_PID; dirty = 1; }
-                if (c == '2' || c == 0x02) { sort_col = SORT_CPU; dirty = 1; }
-                if (c == '3' || c == 0x03) { sort_col = SORT_LOG_R; dirty = 1; }
-                if (c == '4' || c == 0x04) { sort_col = SORT_LOG_W; dirty = 1; }
-                if (c == '5' || c == 0x05) { sort_col = SORT_WAIT; dirty = 1; }
-                if (c == '6' || c == 0x06) { sort_col = SORT_RMIB; dirty = 1; }
-                if (c == '7' || c == 0x07) { sort_col = SORT_WMIB; dirty = 1; }
-            } else {
-                break;
+                
+                if (mode == MODE_PROCESS) {
+                    if (c == '1' || c == 0x01) { sort_col_proc = SORT_PID; dirty = 1; }
+                    if (c == '2' || c == 0x02) { sort_col_proc = SORT_CPU; dirty = 1; }
+                    if (c == '3' || c == 0x03) { sort_col_proc = SORT_LOG_R; dirty = 1; }
+                    if (c == '4' || c == 0x04) { sort_col_proc = SORT_LOG_W; dirty = 1; }
+                    if (c == '5' || c == 0x05) { sort_col_proc = SORT_WAIT; dirty = 1; }
+                    if (c == '6' || c == 0x06) { sort_col_proc = SORT_RMIB; dirty = 1; }
+                    if (c == '7' || c == 0x07) { sort_col_proc = SORT_WMIB; dirty = 1; }
+                } else { // MODE_NETWORK
+                    if (c == '1' || c == 0x01) { sort_col_net = SORT_NET_RX; dirty = 1; }
+                    if (c == '2' || c == 0x02) { sort_col_net = SORT_NET_TX; dirty = 1; }
+                }
             }
         }
 
