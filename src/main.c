@@ -21,6 +21,8 @@
 #define CMD_MAX 512
 #endif
 
+#define KVM_VERSION "v1.0.1"
+
 // --- Terminal Handling ---
 static struct termios orig_termios;
 static int raw_mode_enabled = 0;
@@ -399,9 +401,16 @@ int main(int argc, char **argv) {
                 printf("\033[2J\033[H"); // Clear screen
                 int cols = get_term_cols();
                 
-                printf("kvmtop - Refresh=%.1fs | Mode: %s ('t' to toggle)\n", interval, show_tree ? "Tree" : "List");
+                // Top status bar
+                char left[128], right[128];
+                snprintf(left, sizeof(left), "kvmtop %s", KVM_VERSION);
+                snprintf(right, sizeof(right), "Refresh=%.1fs | [t] Threads | [1-7] Sort | [q] Quit", interval);
+                
+                int pad = cols - (int)strlen(left) - (int)strlen(right);
+                if (pad < 1) pad = 1;
+                printf("%s%*s%s\n", left, pad, "", right);
 
-                int pidw = 14; // Wider for tree indentation
+                int pidw = 14; 
                 int cpuw = 8, iopsw = 10, mibw = 10, waitw=10;
                 int fixed = pidw+1 + cpuw+1 + iopsw+1 + iopsw+1 + waitw+1 + mibw+1 + mibw+1;
                 int cmdw = cols - fixed; if (cmdw < 10) cmdw = 10;
