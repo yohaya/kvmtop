@@ -782,7 +782,7 @@ int main(int argc, char **argv) {
                 
                 char left[128], right[128];
                 snprintf(left, sizeof(left), "kvmtop %s", KVM_VERSION);
-                snprintf(right, sizeof(right), "Refresh=%.1fs | [n] Net | [t] Tree | [f] Freeze: %s | [1-7] Sort | [q] Quit", 
+                snprintf(right, sizeof(right), "Refresh=%.1fs | [c] CPU/Disk | [n] Net | [t] Tree | [f] Freeze: %s | [1-7] Sort | [q] Quit", 
                          interval, frozen ? "ON" : "OFF");
                 
                 int pad = cols - (int)strlen(left) - (int)strlen(right);
@@ -797,7 +797,7 @@ int main(int argc, char **argv) {
                     else
                         qsort(curr_net.data, curr_net.len, sizeof(net_iface_t), cmp_net_tx_desc);
 
-                    int namew=16, statw=6, ratew=12, pktw=10, errw=8;
+                    int namew=16, statw=10, ratew=12, pktw=10, errw=8;
                     char h_rx[32], h_tx[32];
                     snprintf(h_rx, 32, "[1] %s", "RX_Mbps");
                     snprintf(h_tx, 32, "[2] %s", "TX_Mbps");
@@ -921,8 +921,9 @@ int main(int argc, char **argv) {
             if (c > 0) {
                 if (c == 'q' || c == 'Q') goto cleanup;
                 if (c == 'f' || c == 'F') { frozen = !frozen; dirty = 1; }
-                if (c == 't' || c == 'T') { show_tree = !show_tree; dirty = 1; }
-                if (c == 'n' || c == 'N') { mode = (mode == MODE_NETWORK) ? MODE_PROCESS : MODE_NETWORK; dirty = 1; }
+                if (c == 't' || c == 'T') { show_tree = !show_tree; mode = MODE_PROCESS; dirty = 1; }
+                if (c == 'n' || c == 'N') { mode = MODE_NETWORK; dirty = 1; }
+                if (c == 'c' || c == 'C') { mode = MODE_PROCESS; dirty = 1; }
                 
                 if (mode == MODE_PROCESS) {
                     if (c == '1' || c == 0x01) { sort_col_proc = SORT_PID; dirty = 1; }
