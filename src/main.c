@@ -312,8 +312,8 @@ static int read_system_disk_iops(uint64_t *r_iops, uint64_t *w_iops) {
     while (fgets(line, sizeof(line), f)) {
         int major, minor;
         char name[64];
-        uint64_t rio, rmerge, rsect, ruse;
-        uint64_t wio, wmerge, wsect, wuse;
+        unsigned long long rio, rmerge, rsect, ruse;
+        unsigned long long wio, wmerge, wsect, wuse;
         
         if (sscanf(line, "%d %d %s %llu %llu %llu %llu %llu %llu %llu %llu",
                    &major, &minor, name,
@@ -353,8 +353,8 @@ static int collect_net_dev(vec_net_t *out) {
         strncpy(ni.name, name_start, sizeof(ni.name)-1);
 
         char *stats = colon + 1;
-        uint64_t rb, rp, re, rd, rf, rfr, rc, rm;
-        uint64_t tb, tp, te, td, tf, tco, tca, tc;
+        unsigned long long rb, rp, re, rd, rf, rfr, rc, rm;
+        unsigned long long tb, tp, te, td, tf, tco, tca, tc;
         
         if (sscanf(stats, "%llu %llu %llu %llu %llu %llu %llu %llu %llu %llu %llu %llu %llu %llu %llu %llu",
                    &rb, &rp, &re, &rd, &rf, &rfr, &rc, &rm,
@@ -702,6 +702,8 @@ int main(int argc, char **argv) {
     sort_col_t sort_col_net = SORT_NET_TX;
 
     while (1) {
+        double t_curr = 0;
+        
         if (!frozen) {
             vec_free(&curr_raw); vec_init(&curr_raw);
             collect_samples(&curr_raw, filter, filter_n);
@@ -712,7 +714,7 @@ int main(int argc, char **argv) {
 
             read_system_disk_iops(&curr_sys_r, &curr_sys_w);
 
-            double t_curr = now_monotonic();
+            t_curr = now_monotonic();
             double dt = t_curr - t_prev;
             if (dt <= 0) dt = interval;
 
