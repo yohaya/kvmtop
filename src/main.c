@@ -651,64 +651,212 @@ static const sample_t *find_prev(const vec_t *prev, uint64_t key) {
     return NULL;
 }
 
+// --- Global Sort State ---
+static int sort_desc = 1;
+
 // Sort Comparators
 typedef enum { 
     SORT_PID=1, SORT_CPU, SORT_LOG_R, SORT_LOG_W, SORT_WAIT, SORT_RMIB, SORT_WMIB,
-    SORT_NET_RX, SORT_NET_TX
+    SORT_NET_RX, SORT_NET_TX,
+    SORT_MEM_RES, SORT_MEM_SHR, SORT_MEM_VIRT, SORT_USER, SORT_UPTIME // Add missing enums if needed or reuse
 } sort_col_t;
 
-static int cmp_pid_desc(const void *a, const void *b) {
+// Helper macro for numeric comparison
+#define CMP_NUM(a, b) (sort_desc ? ((a) < (b) ? 1 : ((a) > (b) ? -1 : 0)) : ((a) > (b) ? 1 : ((a) < (b) ? -1 : 0)))
+
+static int cmp_pid(const void *a, const void *b) {
     const sample_t *x = (const sample_t *)a;
     const sample_t *y = (const sample_t *)b;
-    return (x->pid < y->pid) - (x->pid > y->pid); 
+    return CMP_NUM(x->pid, y->pid); 
 }
-static int cmp_cpu_desc(const void *a, const void *b) {
+static int cmp_cpu(const void *a, const void *b) {
     const sample_t *x = (const sample_t *)a;
     const sample_t *y = (const sample_t *)b;
-    return (x->cpu_pct < y->cpu_pct) - (x->cpu_pct > y->cpu_pct);
+    return CMP_NUM(x->cpu_pct, y->cpu_pct);
 }
-static int cmp_logr_desc(const void *a, const void *b) {
+static int cmp_logr(const void *a, const void *b) {
     const sample_t *x = (const sample_t *)a;
     const sample_t *y = (const sample_t *)b;
-    return (x->r_iops < y->r_iops) - (x->r_iops > y->r_iops);
+    return CMP_NUM(x->r_iops, y->r_iops);
 }
-static int cmp_logw_desc(const void *a, const void *b) {
+static int cmp_logw(const void *a, const void *b) {
     const sample_t *x = (const sample_t *)a;
     const sample_t *y = (const sample_t *)b;
-    return (x->w_iops < y->w_iops) - (x->w_iops > y->w_iops);
+    return CMP_NUM(x->w_iops, y->w_iops);
 }
-static int cmp_wait_desc(const void *a, const void *b) {
+static int cmp_wait(const void *a, const void *b) {
     const sample_t *x = (const sample_t *)a;
     const sample_t *y = (const sample_t *)b;
-    return (x->io_wait_ms < y->io_wait_ms) - (x->io_wait_ms > y->io_wait_ms);
+    return CMP_NUM(x->io_wait_ms, y->io_wait_ms);
 }
-static int cmp_rmib_desc(const void *a, const void *b) {
+static int cmp_rmib(const void *a, const void *b) {
     const sample_t *x = (const sample_t *)a;
     const sample_t *y = (const sample_t *)b;
-    return (x->r_mib < y->r_mib) - (x->r_mib > y->r_mib);
+    return CMP_NUM(x->r_mib, y->r_mib);
 }
-static int cmp_wmib_desc(const void *a, const void *b) {
+static int cmp_wmib(const void *a, const void *b) {
     const sample_t *x = (const sample_t *)a;
     const sample_t *y = (const sample_t *)b;
-    return (x->w_mib < y->w_mib) - (x->w_mib > y->w_mib);
+    return CMP_NUM(x->w_mib, y->w_mib);
 }
-static int cmp_net_rx_desc(const void *a, const void *b) {
+static int cmp_net_rx(const void *a, const void *b) {
     const net_iface_t *x = (const net_iface_t *)a;
     const net_iface_t *y = (const net_iface_t *)b;
-    return (x->rx_mbps < y->rx_mbps) - (x->rx_mbps > y->rx_mbps);
+    return CMP_NUM(x->rx_mbps, y->rx_mbps);
 }
-static int cmp_net_tx_desc(const void *a, const void *b) {
+static int cmp_net_tx(const void *a, const void *b) {
     const net_iface_t *x = (const net_iface_t *)a;
     const net_iface_t *y = (const net_iface_t *)b;
-    return (x->tx_mbps < y->tx_mbps) - (x->tx_mbps > y->tx_mbps);
+    return CMP_NUM(x->tx_mbps, y->tx_mbps);
 }
-static int cmp_disk_rio_desc(const void *a, const void *b) {
+static int cmp_disk_rio(const void *a, const void *b) {
     const disk_sample_t *x = (const disk_sample_t *)a;
     const disk_sample_t *y = (const disk_sample_t *)b;
-    return (x->r_iops < y->r_iops) - (x->r_iops > y->r_iops);
+    return CMP_NUM(x->r_iops, y->r_iops);
 }
 
-// Aggregate threads into process-level stats
+// ... (in main loop) ...
+
+                    switch(sort_col_proc) {
+                        case SORT_PID: qsort(view_list->data, view_list->len, sizeof(sample_t), cmp_pid); break;
+                        case SORT_CPU: qsort(view_list->data, view_list->len, sizeof(sample_t), cmp_cpu); break;
+                        case SORT_LOG_R: qsort(view_list->data, view_list->len, sizeof(sample_t), cmp_logr); break;
+                        case SORT_LOG_W: qsort(view_list->data, view_list->len, sizeof(sample_t), cmp_logw); break;
+                        case SORT_WAIT: qsort(view_list->data, view_list->len, sizeof(sample_t), cmp_wait); break;
+                        case SORT_RMIB: qsort(view_list->data, view_list->len, sizeof(sample_t), cmp_rmib); break;
+                        case SORT_WMIB: qsort(view_list->data, view_list->len, sizeof(sample_t), cmp_wmib); break;
+                        default: qsort(view_list->data, view_list->len, sizeof(sample_t), cmp_cpu); break;
+                    }
+
+                    // Column Widths
+                    int pidw = 10, userw = 10, uptimew=10, memw = 10;
+                    int logw=10, waitw=8, mibw=10, cpuw=8, statew=3;
+                    
+                    // Rearranged Headers
+                    // Order: PID, User, Uptime, Res, Shr, Virt, R_Log, W_Log, Wait, R_MiB, W_MiB, CPU, State, COMMAND
+                    
+                    printf("%*s %*s %*s %*s %*s %*s %*s %*s %*s %*s %*s %*s %*s %s\n",
+                        pidw, "[1] PID",
+                        userw, "User",
+                        uptimew, "Uptime",
+                        memw, "Res(MiB)",
+                        memw, "Shr(MiB)",
+                        memw, "Virt(MiB)",
+                        logw, "[3] R_Log",
+                        logw, "[4] W_Log",
+                        waitw, "[5] Wait",
+                        mibw, "[6] R_MiB",
+                        mibw, "[7] W_MiB",
+                        cpuw, "[2] CPU%",
+                        statew, "[8] S",
+                        "COMMAND LINE"
+                    );
+                    
+                    int fixed_width = pidw+1 + userw+1 + uptimew+1 + 
+                                      memw+1 + memw+1 + memw+1 + 
+                                      logw+1 + logw+1 + waitw+1 + 
+                                      mibw+1 + mibw+1 + 
+                                      cpuw+1 + statew+1;
+                    
+                    int cmdw = cols - fixed_width; 
+                    if (cmdw < 10) cmdw = 10;
+
+                    for(int i=0; i<cols; i++) putchar('-');
+                    putchar('\n');
+
+                    // Calc totals
+                    double t_cpu=0, t_ri=0, t_wi=0, t_rm=0, t_wm=0, t_wt=0;
+                    double t_res=0, t_shr=0, t_virt=0;
+                    
+                    for(size_t i=0; i<curr_raw.len; i++) {
+                        t_cpu += curr_raw.data[i].cpu_pct;
+                        t_ri  += curr_raw.data[i].r_iops;
+                        t_wi  += curr_raw.data[i].w_iops;
+                        t_rm  += curr_raw.data[i].r_mib;
+                        t_wm  += curr_raw.data[i].w_mib;
+                        t_wt  += curr_raw.data[i].io_wait_ms;
+                        
+                        t_res  += (double)curr_raw.data[i].mem_res_pages * 4096.0 / 1048576.0;
+                        t_shr  += (double)curr_raw.data[i].mem_shr_pages * 4096.0 / 1048576.0;
+                        t_virt += (double)curr_raw.data[i].mem_virt_pages * 4096.0 / 1048576.0;
+                    }
+
+                    int limit = display_limit; 
+                    if ((size_t)limit > view_list->len) limit = view_list->len;
+                    
+                    struct sysinfo si;
+                    sysinfo(&si);
+                    long uptime_sec = si.uptime;
+
+                    for (int i=0; i<limit; i++) {
+                        const sample_t *c = &view_list->data[i];
+                        char pidbuf[32];
+                        snprintf(pidbuf, sizeof(pidbuf), "%d", c->tgid);
+
+                        if (strlen(filter_str) > 0) {
+                             if (!strcasestr(c->cmd, filter_str) && !strcasestr(pidbuf, filter_str) && !strcasestr(c->user, filter_str)) continue;
+                        }
+                        
+                        double res_mib = (double)c->mem_res_pages * 4096.0 / 1048576.0;
+                        double shr_mib = (double)c->mem_shr_pages * 4096.0 / 1048576.0;
+                        double virt_mib = (double)c->mem_virt_pages * 4096.0 / 1048576.0;
+
+                        long proc_uptime = uptime_sec - (c->start_time_ticks / hz);
+                        char uptime_buf[32];
+                        int days = proc_uptime / 86400;
+                        int hrs = (proc_uptime % 86400) / 3600;
+                        int mins = (proc_uptime % 3600) / 60;
+                        int secs = proc_uptime % 60;
+                        if (days > 0) snprintf(uptime_buf, 32, "%dd%02dh", days, hrs);
+                        else snprintf(uptime_buf, 32, "%02d:%02d:%02d", hrs, mins, secs);
+
+                        printf("%*s %*s %*s %*.0f %*.0f %*.0f %*.*f %*.*f %*.*f %*.*f %*.*f %*.*f %*c ",
+                            pidw, pidbuf,
+                            userw, c->user,
+                            uptimew, uptime_buf,
+                            memw, res_mib,
+                            memw, shr_mib,
+                            memw, virt_mib,
+                            logw, 2, c->r_iops,
+                            logw, 2, c->w_iops,
+                            waitw, 2, c->io_wait_ms,
+                            mibw, 0, c->r_mib,
+                            mibw, 0, c->w_mib,
+                            cpuw, 2, c->cpu_pct,
+                            statew, c->state);
+                        fprint_trunc(stdout, c->cmd, cmdw);
+                        putchar('\n');
+
+                        if (show_tree) {
+                            // Tree indent - simplistic
+                            print_threads_for_tgid(&curr_raw, c->tgid, cols, pidw, cpuw, logw, waitw, mibw, cmdw);
+                        }
+                    }
+
+                    for(int i=0; i<cols; i++) putchar('-');
+                    putchar('\n');
+                    printf("%*s %*s %*s %*.0f %*.0f %*.0f %*.*f %*.*f %*.*f %*.*f %*.*f %*.*f\n",
+                            pidw, "TOTAL",
+                            userw, "",
+                            uptimew, "",
+                            memw, t_res,
+                            memw, t_shr,
+                            memw, t_virt,
+                            logw, 2, t_ri,
+                            logw, 2, t_wi,
+                            waitw, 2, t_wt,
+                            mibw, 0, t_rm,
+                            mibw, 0, t_wm,
+                            cpuw, 2, t_cpu);
+// ... (Key Handlers) ...
+                    if (c == '1' || c == 0x01) { if (sort_col_proc == SORT_PID) sort_desc = !sort_desc; else { sort_col_proc = SORT_PID; sort_desc = 1; } dirty = 1; }
+                    if (c == '2' || c == 0x02) { if (sort_col_proc == SORT_CPU) sort_desc = !sort_desc; else { sort_col_proc = SORT_CPU; sort_desc = 1; } dirty = 1; }
+                    if (c == '3' || c == 0x03) { if (sort_col_proc == SORT_LOG_R) sort_desc = !sort_desc; else { sort_col_proc = SORT_LOG_R; sort_desc = 1; } dirty = 1; }
+                    if (c == '4' || c == 0x04) { if (sort_col_proc == SORT_LOG_W) sort_desc = !sort_desc; else { sort_col_proc = SORT_LOG_W; sort_desc = 1; } dirty = 1; }
+                    if (c == '5' || c == 0x05) { if (sort_col_proc == SORT_WAIT) sort_desc = !sort_desc; else { sort_col_proc = SORT_WAIT; sort_desc = 1; } dirty = 1; }
+                    if (c == '6' || c == 0x06) { if (sort_col_proc == SORT_RMIB) sort_desc = !sort_desc; else { sort_col_proc = SORT_RMIB; sort_desc = 1; } dirty = 1; }
+                    if (c == '7' || c == 0x07) { if (sort_col_proc == SORT_WMIB) sort_desc = !sort_desc; else { sort_col_proc = SORT_WMIB; sort_desc = 1; } dirty = 1; }
+
 static void aggregate_by_tgid(const vec_t *src, vec_t *dst) {
     vec_init(dst);
     // 1. Deep copy
