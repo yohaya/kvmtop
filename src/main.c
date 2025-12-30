@@ -781,7 +781,7 @@ int main(int argc, char **argv) {
 
                     for(size_t i=0; i<curr_net.len; i++) {
                         net_iface_t *n = &curr_net.data[i];
-                        if (strcmp(n->name, "lo")==0) continue;
+                        if (strncmp(n->name, "fw", 2) == 0 || strcmp(n->name, "lo")==0) continue;
 
                         char vmid_buf[16] = "-";
                         if (n->vmid > 0) snprintf(vmid_buf, sizeof(vmid_buf), "%d", n->vmid);
