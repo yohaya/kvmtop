@@ -231,7 +231,7 @@ static int read_cmdline(pid_t pid, char out[CMD_MAX]) {
     snprintf(path, sizeof(path), "/proc/%d/cmdline", pid);
     if (read_small_file(path, buf, sizeof(buf), &n) == 0 && n > 0) {
         sanitize_cmd(out, buf, (size_t)n);
-        if (out[0] != '\0') return 0;
+        if (out[0] != '\0' && out[0] != ' ') return 0;
     }
 
     // Fallback to /proc/[pid]/comm
@@ -239,7 +239,7 @@ static int read_cmdline(pid_t pid, char out[CMD_MAX]) {
     if (read_small_file(path, buf, sizeof(buf), &n) == 0 && n > 0) {
         // Comm usually has a newline at the end, sanitize handles it
         sanitize_cmd(out, buf, (size_t)n); 
-        if (out[0] != '\0') return 0;
+        if (out[0] != '\0' && out[0] != ' ') return 0;
     }
 
     snprintf(out, CMD_MAX, "[%d]", pid);
@@ -646,6 +646,10 @@ int main(int argc, char **argv) {
     int frozen = 0;
     char filter_str[64] = {0};
     int in_filter_mode = 0;
+    
+    int in_limit_mode = 0;
+    char limit_str[16] = {0};
+
     display_mode_t mode = MODE_PROCESS;
     
     pid_t *filter = NULL;
@@ -687,7 +691,8 @@ int main(int argc, char **argv) {
     uint64_t curr_sys_r=0, curr_sys_w=0;
     read_system_disk_iops(&prev_sys_r, &prev_sys_w);
 
-    printf("Initializing (wait %.0fs)...\n", interval);
+    printf("Initializing (wait %.0fs)...
+", interval);
     
     if (collect_samples(&prev, filter, filter_n) != 0) return 1;
     collect_net_dev(&prev_net);
@@ -787,12 +792,18 @@ int main(int argc, char **argv) {
                 
                 char left[128], right[128];
                 snprintf(left, sizeof(left), "kvmtop %s", KVM_VERSION);
+                
                 if (in_filter_mode) {
                     snprintf(right, sizeof(right), "FILTER: %s_", filter_str);
-                } else if (strlen(filter_str) > 0) {
-                    snprintf(right, sizeof(right), "Filter: %s | [n] Net | [t] Tree | [f] Freeze: %s | [/] Filter | [q] Quit", filter_str, frozen ? "ON" : "OFF");
+                } else if (in_limit_mode) {
+                    snprintf(right, sizeof(right), "LIMIT: %s_", limit_str);
                 } else {
-                    snprintf(right, sizeof(right), "Refresh=%.1fs | [c] CPU/Disk | [n] Net | [t] Tree | [f] Freeze: %s | [/] Filter | [q] Quit", interval, frozen ? "ON" : "OFF");
+                    // Normal header
+                    char f_info[40] = "";
+                    if (strlen(filter_str) > 0) snprintf(f_info, sizeof(f_info), "Filter: %s | ", filter_str);
+                    
+                    snprintf(right, sizeof(right), "%sRefresh=%.1fs | [c] CPU/Disk | [n] Net | [t] Tree | [l] Limit(%d) | [f] Freeze: %s | [/] Filter | [q] Quit", 
+                             f_info, interval, display_limit, frozen ? "ON" : "OFF");
                 }
                 
                 int pad = cols - (int)strlen(left) - (int)strlen(right);
@@ -959,8 +970,34 @@ int main(int argc, char **argv) {
                         }
                         dirty = 1;
                     }
+                } else if (in_limit_mode) {
+                    if (c == 27) { // ESC
+                        in_limit_mode = 0;
+                        limit_str[0] = '\0';
+                        dirty = 1;
+                    } else if (c == 127 || c == 8) {
+                        size_t len = strlen(limit_str);
+                        if (len > 0) limit_str[len-1] = '\0';
+                        dirty = 1;
+                    } else if (c == '\n' || c == '\r') {
+                        if (strlen(limit_str) > 0) {
+                            int val = atoi(limit_str);
+                            if (val > 0) display_limit = val;
+                        }
+                        in_limit_mode = 0;
+                        limit_str[0] = '\0';
+                        dirty = 1;
+                    } else if (isdigit(c)) {
+                        size_t len = strlen(limit_str);
+                        if (len < sizeof(limit_str)-1) {
+                            limit_str[len] = (char)c;
+                            limit_str[len+1] = '\0';
+                        }
+                        dirty = 1;
+                    }
                 } else {
                     if (c == '/') { in_filter_mode = 1; dirty = 1; }
+                    if (c == 'l' || c == 'L') { in_limit_mode = 1; limit_str[0]='\0'; dirty = 1; }
                     if (c == 'q' || c == 'Q') goto cleanup;
                     if (c == 'f' || c == 'F') { frozen = !frozen; dirty = 1; }
                     if (c == 't' || c == 'T') { show_tree = !show_tree; mode = MODE_PROCESS; dirty = 1; }
@@ -987,7 +1024,6 @@ int main(int argc, char **argv) {
             qsort(curr_raw.data, curr_raw.len, sizeof(sample_t), cmp_key);
             vec_free(&prev); prev = curr_raw; vec_init(&curr_raw);
             vec_net_free(&prev_net); prev_net = curr_net; vec_net_init(&curr_net);
-            t_prev = t_curr;
             prev_sys_r = curr_sys_r;
             prev_sys_w = curr_sys_w;
         }
