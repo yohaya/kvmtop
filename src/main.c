@@ -64,9 +64,9 @@ static int wait_for_input(double seconds) {
 
 // --- Data Structures ---
 typedef struct {
-    pid_t pid;
-    pid_t tid;
-    uint64_t key; 
+    pid_t pid;  // This is the TID (Thread ID)
+    pid_t tgid; // This is the Process ID (Thread Group ID)
+    uint64_t key; // Unique key (usually just pid/tid)
 
     uint64_t syscr;
     uint64_t syscw;
@@ -85,187 +85,69 @@ typedef struct {
     char cmd[CMD_MAX];
 } sample_t;
 
-typedef struct {
-    sample_t *data;
-    size_t len;
-    size_t cap;
-} vec_t;
+// ... (vec_t funcs) ...
 
-static void vec_init(vec_t *v) { v->data=NULL; v->len=0; v->cap=0; }
-static void vec_free(vec_t *v) { free(v->data); v->data=NULL; v->len=0; v->cap=0; }
-static void vec_push(vec_t *v, const sample_t *item) {
-    if (v->len == v->cap) {
-        size_t new_cap = v->cap ? v->cap * 2 : 4096;
-        sample_t *p = (sample_t *)realloc(v->data, new_cap * sizeof(*p));
-        if (!p) { fprintf(stderr, "OOM\n"); exit(2); }
-        v->data = p;
-        v->cap = new_cap;
-    }
-    v->data[v->len++] = *item;
+static uint64_t make_key(pid_t tid) {
+    return (uint64_t)tid; 
 }
 
-static int is_numeric_str(const char *s) {
-    if (!s || !*s) return 0;
-    for (const unsigned char *p = (const unsigned char *)s; *p; ++p) if (!isdigit(*p)) return 0;
-    return 1;
-}
+// ... (helpers) ...
 
-static uint64_t make_key(pid_t pid, pid_t tid) {
-    return ((uint64_t)(uint32_t)pid << 32) | (uint64_t)(uint32_t)tid;
-}
-
-static double now_monotonic(void) {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
-}
-
-static int read_small_file(const char *path, char *buf, size_t buflen, ssize_t *nread_out) {
-    FILE *f = fopen(path, "r");
-    if (!f) return -1;
-    size_t n = fread(buf, 1, buflen - 1, f);
-    fclose(f);
-    buf[n] = '\0';
-    if (nread_out) *nread_out = (ssize_t)n;
-    return 0;
-}
-
-static void sanitize_cmd(char out[CMD_MAX], const char *in, size_t in_len) {
-    size_t o = 0;
-    int prev_space = 1;
-    for (size_t i = 0; i < in_len && o + 1 < CMD_MAX; i++) {
-        unsigned char c = (unsigned char)in[i];
-        if (c == '\0' || c == '\n' || c == '\r' || c == '\t') c = ' ';
-        if (c == ' ') {
-            if (prev_space) continue;
-            prev_space = 1;
-            out[o++] = ' ';
-            continue;
-        }
-        prev_space = 0;
-        if (c == '"') c = '\'';
-        if (!isprint(c)) c = '?';
-        out[o++] = (char)c;
-    }
-    while (o > 0 && out[o - 1] == ' ') o--;
-    out[o] = '\0';
-}
-
-static int read_cmdline(pid_t pid, char out[CMD_MAX]) {
-    char path[PATH_MAX], buf[8192];
-    ssize_t n = 0;
-    snprintf(path, sizeof(path), "/proc/%d/cmdline", pid);
-    if (read_small_file(path, buf, sizeof(buf), &n) == 0 && n > 0) {
-        sanitize_cmd(out, buf, (size_t)n);
-        if (out[0] != '\0') return 0;
-    }
-    snprintf(path, sizeof(path), "/proc/%d/comm", pid);
-    if (read_small_file(path, buf, sizeof(buf), &n) == 0 && n > 0) {
-        sanitize_cmd(out, buf, (size_t)n);
-        if (out[0] != '\0') return 0;
-    }
-    snprintf(out, CMD_MAX, "%s", "?");
-    return -1;
-}
-
-static int read_io_file(const char *path, uint64_t *syscr, uint64_t *syscw, uint64_t *read_bytes, uint64_t *write_bytes) {
-    FILE *f = fopen(path, "r");
-    if (!f) return -1;
-    uint64_t v_syscr=0, v_syscw=0, v_rbytes=0, v_wbytes=0;
-    char line[256];
-    while (fgets(line, sizeof(line), f)) {
-        char key[64]; unsigned long long val = 0;
-        if (sscanf(line, "%63[^:]: %llu", key, &val) == 2) {
-            if (strcmp(key, "syscr") == 0) v_syscr = (uint64_t)val;
-            else if (strcmp(key, "syscw") == 0) v_syscw = (uint64_t)val;
-            else if (strcmp(key, "read_bytes") == 0) v_rbytes = (uint64_t)val;
-            else if (strcmp(key, "write_bytes") == 0) v_wbytes = (uint64_t)val;
-        }
-    }
-    fclose(f);
-    *syscr = v_syscr; *syscw = v_syscw; *read_bytes = v_rbytes; *write_bytes = v_wbytes;
-    return 0;
-}
-
-static int read_proc_stat_fields(const char *path, uint64_t *cpu_jiffies_out, uint64_t *blkio_ticks_out) {
-    char buf[4096]; ssize_t n = 0;
-    if (read_small_file(path, buf, sizeof(buf), &n) != 0 || n <= 0) return -1;
-    char *rparen = strrchr(buf, ')');
-    if (!rparen) return -1;
-    char *p = rparen + 2; 
-    char *save = NULL; char *tok = strtok_r(p, " ", &save);
-    int idx = 0; uint64_t utime=0, stime=0;
-    *blkio_ticks_out = 0;
-    
-    while (tok) {
-        if (idx == 11) utime = strtoull(tok, NULL, 10);
-        else if (idx == 12) stime = strtoull(tok, NULL, 10);
-        else if (idx == 39) { // Field 42 (42 - 3 = 39)
-            *blkio_ticks_out = strtoull(tok, NULL, 10);
-            break; 
-        }
-        idx++; tok = strtok_r(NULL, " ", &save);
-    }
-    *cpu_jiffies_out = utime + stime;
-    return 0;
-}
-
-static int pid_in_filter(pid_t pid, const pid_t *filter, size_t n) {
-    if (!filter || n == 0) return 1;
-    for (size_t i = 0; i < n; i++) if (filter[i] == pid) return 1;
-    return 0;
-}
-
-static int collect_samples(vec_t *out, int include_threads, const pid_t *filter_pids, size_t filter_n) {
+static int collect_samples(vec_t *out, const pid_t *filter_pids, size_t filter_n) {
     DIR *proc = opendir("/proc");
     if (!proc) { perror("opendir(/proc)"); return -1; }
     struct dirent *de;
+    
     while ((de = readdir(proc)) != NULL) {
         if (!is_numeric_str(de->d_name)) continue;
-        pid_t pid = (pid_t)atoi(de->d_name);
-        if (pid <= 0) continue;
-        if (!pid_in_filter(pid, filter_pids, filter_n)) continue;
+        pid_t pid = (pid_t)atoi(de->d_name); // This is the TGID
+        
+        // Filter by TGID (Process ID)
+        if (filter_n > 0 && !pid_in_filter(pid, filter_pids, filter_n)) continue;
 
         char cmd[CMD_MAX];
         read_cmdline(pid, cmd);
 
-        if (!include_threads) {
-            sample_t s; memset(&s, 0, sizeof(s));
-            s.pid = pid; s.tid = pid; s.key = make_key(pid, pid);
-            snprintf(s.cmd, sizeof(s.cmd), "%s", cmd);
-            char io_path[PATH_MAX], stat_path[PATH_MAX];
-            snprintf(io_path, sizeof(io_path), "/proc/%d/io", pid);
-            snprintf(stat_path, sizeof(stat_path), "/proc/%d/stat", pid);
-            
-            // Try reading IO, ignore failure (s.syscr etc are already 0 from memset)
-            read_io_file(io_path, &s.syscr, &s.syscw, &s.read_bytes, &s.write_bytes);
-            
-            read_proc_stat_fields(stat_path, &s.cpu_jiffies, &s.blkio_ticks);
-            vec_push(out, &s);
-        } else {
-            char taskdir_path[PATH_MAX];
-            snprintf(taskdir_path, sizeof(taskdir_path), "/proc/%d/task", pid);
-            DIR *taskdir = opendir(taskdir_path);
-            if (!taskdir) continue;
+        char taskdir_path[PATH_MAX];
+        snprintf(taskdir_path, sizeof(taskdir_path), "/proc/%d/task", pid);
+        DIR *taskdir = opendir(taskdir_path);
+        
+        if (taskdir) {
             struct dirent *te;
             while ((te = readdir(taskdir)) != NULL) {
                 if (!is_numeric_str(te->d_name)) continue;
                 pid_t tid = (pid_t)atoi(te->d_name);
-                if (tid <= 0) continue;
+                
                 sample_t s; memset(&s, 0, sizeof(s));
-                s.pid = pid; s.tid = tid; s.key = make_key(pid, tid);
-                snprintf(s.cmd, sizeof(s.cmd), "%s", cmd);
+                s.pid = tid; 
+                s.tgid = pid;
+                s.key = make_key(tid);
+                snprintf(s.cmd, sizeof(s.cmd), "%s", cmd); // Threads share cmdline usually
+
                 char io_path[PATH_MAX], stat_path[PATH_MAX];
                 snprintf(io_path, sizeof(io_path), "/proc/%d/task/%d/io", pid, tid);
                 snprintf(stat_path, sizeof(stat_path), "/proc/%d/task/%d/stat", pid, tid);
                 
-                // Try reading IO, ignore failure
                 read_io_file(io_path, &s.syscr, &s.syscw, &s.read_bytes, &s.write_bytes);
-                
                 read_proc_stat_fields(stat_path, &s.cpu_jiffies, &s.blkio_ticks);
                 vec_push(out, &s);
             }
             closedir(taskdir);
+        } else {
+            // Fallback if task dir unreadable (should be rare)
+            sample_t s; memset(&s, 0, sizeof(s));
+            s.pid = pid; 
+            s.tgid = pid;
+            s.key = make_key(pid);
+            snprintf(s.cmd, sizeof(s.cmd), "%s", cmd);
+
+            char io_path[PATH_MAX], stat_path[PATH_MAX];
+            snprintf(io_path, sizeof(io_path), "/proc/%d/io", pid);
+            snprintf(stat_path, sizeof(stat_path), "/proc/%d/stat", pid);
+            
+            read_io_file(io_path, &s.syscr, &s.syscw, &s.read_bytes, &s.write_bytes);
+            read_proc_stat_fields(stat_path, &s.cpu_jiffies, &s.blkio_ticks);
+            vec_push(out, &s);
         }
     }
     closedir(proc);
@@ -341,15 +223,88 @@ static int cmp_wmib_desc(const void *a, const void *b) {
     return (x->w_mib < y->w_mib) - (x->w_mib > y->w_mib);
 }
 
+// Aggregate threads into process-level stats
+static void aggregate_by_tgid(const vec_t *src, vec_t *dst) {
+    vec_init(dst);
+    // Src is sorted by KEY (TID), but we need to group by TGID.
+    // Easiest is to push all, then sort by TGID, then merge.
+    // But src is already deltas/metrics calculated. 
+    
+    // We need a map or simple sort-merge. Let's do sort-merge.
+    // 1. Copy src to dst (shallow copy of data is bad if we modify, so deep copy)
+    for (size_t i=0; i<src->len; i++) {
+        vec_push(dst, &src->data[i]);
+    }
+    
+    // 2. Sort by TGID
+    // Helper comparator for TGID
+    int cmp_tgid(const void *a, const void *b) {
+        const sample_t *x = (const sample_t *)a;
+        const sample_t *y = (const sample_t *)b;
+        return (x->tgid > y->tgid) - (x->tgid < y->tgid);
+    }
+    qsort(dst->data, dst->len, sizeof(sample_t), cmp_tgid);
+
+    // 3. Merge adjacent with same TGID
+    size_t write_idx = 0;
+    if (dst->len > 0) {
+        for (size_t i = 1; i < dst->len; i++) {
+            if (dst->data[write_idx].tgid == dst->data[i].tgid) {
+                // Merge i into write_idx
+                dst->data[write_idx].cpu_pct += dst->data[i].cpu_pct;
+                dst->data[write_idx].r_iops += dst->data[i].r_iops;
+                dst->data[write_idx].w_iops += dst->data[i].w_iops;
+                dst->data[write_idx].io_wait_ms += dst->data[i].io_wait_ms;
+                dst->data[write_idx].r_mib += dst->data[i].r_mib;
+                dst->data[write_idx].w_mib += dst->data[i].w_mib;
+                // Keep the PID of the TGID (usually the main thread) or just use TGID
+                dst->data[write_idx].pid = dst->data[write_idx].tgid; 
+            } else {
+                write_idx++;
+                dst->data[write_idx] = dst->data[i];
+                dst->data[write_idx].pid = dst->data[i].tgid; // Ensure PID column shows TGID
+            }
+        }
+        dst->len = write_idx + 1;
+    }
+}
+
+// Tree view helper: Find all threads for a given TGID in the raw list
+static void print_threads_for_tgid(const vec_t *raw, pid_t tgid, int cols, int pidw, int cpuw, int iopsw, int waitw, int mibw, int cmdw) {
+    for (size_t i = 0; i < raw->len; i++) {
+        const sample_t *s = &raw->data[i];
+        if (s->tgid == tgid && s->pid != tgid) { // Don't print the main thread again if it matches TGID exactly, or do? 
+            // Usually main thread has PID == TGID. The Process Row already covers the sum.
+            // If we want to show breakdown, we should show ALL threads including main.
+            // But visually, the "Process" row acts as the sum. 
+            // Let's show all threads indented.
+            
+            char pidbuf[32];
+            snprintf(pidbuf, sizeof(pidbuf), "  └─ %d", s->pid); // Indent
+            
+            printf("%*s %*.*f %*.*f %*.*f %*.*f %*.*f %*.*f ",
+                pidw, pidbuf,
+                cpuw, 2, s->cpu_pct,
+                iopsw, 2, s->r_iops,
+                iopsw, 2, s->w_iops,
+                waitw, 2, s->io_wait_ms,
+                mibw, 2, s->r_mib,
+                mibw, 2, s->w_mib);
+            fprint_trunc(stdout, s->cmd, cmdw);
+            putchar('\n');
+        }
+    }
+}
+
 int main(int argc, char **argv) {
     if (geteuid() != 0) {
         fprintf(stderr, "Warning: Not running as root. IO stats will be unavailable for other users' processes.\n");
         sleep(2);
     }
 
-    double interval = 5.0; // Default to 5 seconds
-    int include_threads = 0;
-    int display_limit = 50; 
+    double interval = 5.0; 
+    int display_limit = 50;
+    int show_tree = 0; 
     
     pid_t *filter = NULL;
     size_t filter_n = 0, filter_cap = 0;
@@ -357,13 +312,12 @@ int main(int argc, char **argv) {
     static const struct option long_opts[] = {
         {"interval", required_argument, NULL, 'i'},
         {"pid", required_argument, NULL, 'p'},
-        {"threads", no_argument, NULL, 't'},
         {"help", no_argument, NULL, 'h'},
         {0, 0, 0, 0}
     };
 
     int opt;
-    while ((opt = getopt_long(argc, argv, "i:p:th", long_opts, NULL)) != -1) {
+    while ((opt = getopt_long(argc, argv, "i:p:h", long_opts, NULL)) != -1) {
         switch (opt) {
             case 'i': interval = strtod(optarg, NULL); if (interval <= 0) return 2; break;
             case 'p': {
@@ -375,17 +329,17 @@ int main(int argc, char **argv) {
                 filter[filter_n++] = (pid_t)v;
                 break;
             }
-            case 't': include_threads = 1; break;
             case 'h': default: return 0;
         }
     }
 
     long hz = sysconf(_SC_CLK_TCK);
-    vec_t prev, curr;
-    vec_init(&prev); vec_init(&curr);
+    vec_t prev, curr_raw, curr_proc;
+    vec_init(&prev); vec_init(&curr_raw); vec_init(&curr_proc);
     
     printf("Initializing (wait %.0fs)...\n", interval);
-    if (collect_samples(&prev, include_threads, filter, filter_n) != 0) return 1;
+    // Initial collection (always collect threads)
+    if (collect_samples(&prev, filter, filter_n) != 0) return 1;
     qsort(prev.data, prev.len, sizeof(sample_t), cmp_key);
     double t_prev = now_monotonic();
 
@@ -393,16 +347,16 @@ int main(int argc, char **argv) {
     sort_col_t sort_col = SORT_CPU;
 
     while (1) {
-        vec_free(&curr); vec_init(&curr);
-        if (collect_samples(&curr, include_threads, filter, filter_n) != 0) break;
+        vec_free(&curr_raw); vec_init(&curr_raw);
+        if (collect_samples(&curr_raw, filter, filter_n) != 0) break;
         
         double t_curr = now_monotonic();
         double dt = t_curr - t_prev;
         if (dt <= 0) dt = interval;
 
-        // Calc metrics
-        for (size_t i=0; i<curr.len; i++) {
-            sample_t *c = &curr.data[i];
+        // 1. Calculate Metrics for ALL threads (Raw)
+        for (size_t i=0; i<curr_raw.len; i++) {
+            sample_t *c = &curr_raw.data[i];
             const sample_t *p = find_prev(&prev, c->key);
             uint64_t d_cpu=0, d_scr=0, d_scw=0, d_rb=0, d_wb=0, d_blk=0;
             if (p) {
@@ -418,37 +372,40 @@ int main(int argc, char **argv) {
             c->w_iops = (double)d_scw / dt;
             c->r_mib  = ((double)d_rb / dt) / 1048576.0;
             c->w_mib  = ((double)d_wb / dt) / 1048576.0;
-            c->io_wait_ms = ((double)d_blk * 1000.0) / (double)hz; // blkio_ticks are in USER_HZ usually? No, Linux doc says "clock ticks".
-            // Actually: man proc says "clock ticks". sysconf(_SC_CLK_TCK) is usually 100.
+            c->io_wait_ms = ((double)d_blk * 1000.0) / (double)hz; 
         }
+
+        // 2. Aggregate into Process List
+        vec_free(&curr_proc); // Clear old
+        aggregate_by_tgid(&curr_raw, &curr_proc);
 
         int dirty = 1;
         double start_wait = now_monotonic();
 
         while (1) {
             if (dirty) {
+                vec_t *view_list = &curr_proc; // Default view is aggregated processes
+
+                // Sort the PROCESS list
                 switch(sort_col) {
-                    case SORT_PID: qsort(curr.data, curr.len, sizeof(sample_t), cmp_pid_desc); break;
-                    case SORT_CPU: qsort(curr.data, curr.len, sizeof(sample_t), cmp_cpu_desc); break;
-                    case SORT_RIOPS: qsort(curr.data, curr.len, sizeof(sample_t), cmp_riops_desc); break;
-                    case SORT_WIOPS: qsort(curr.data, curr.len, sizeof(sample_t), cmp_wiops_desc); break;
-                    case SORT_RMIB: qsort(curr.data, curr.len, sizeof(sample_t), cmp_rmib_desc); break;
-                    case SORT_WMIB: qsort(curr.data, curr.len, sizeof(sample_t), cmp_wmib_desc); break;
+                    case SORT_PID: qsort(view_list->data, view_list->len, sizeof(sample_t), cmp_pid_desc); break;
+                    case SORT_CPU: qsort(view_list->data, view_list->len, sizeof(sample_t), cmp_cpu_desc); break;
+                    case SORT_RIOPS: qsort(view_list->data, view_list->len, sizeof(sample_t), cmp_riops_desc); break;
+                    case SORT_WIOPS: qsort(view_list->data, view_list->len, sizeof(sample_t), cmp_wiops_desc); break;
+                    case SORT_RMIB: qsort(view_list->data, view_list->len, sizeof(sample_t), cmp_rmib_desc); break;
+                    case SORT_WMIB: qsort(view_list->data, view_list->len, sizeof(sample_t), cmp_wmib_desc); break;
                 }
 
                 printf("\033[2J\033[H"); // Clear screen
-                
                 int cols = get_term_cols();
                 
-                // Top status bar with Refresh rate
-                printf("kvmtop - Refresh=%.1fs\n", interval);
+                printf("kvmtop - Refresh=%.1fs | Mode: %s ('t' to toggle)\n", interval, show_tree ? "Tree" : "List");
 
-                int pidw = include_threads ? 11 : 7;
+                int pidw = 14; // Wider for tree indentation
                 int cpuw = 8, iopsw = 10, mibw = 10, waitw=10;
                 int fixed = pidw+1 + cpuw+1 + iopsw+1 + iopsw+1 + waitw+1 + mibw+1 + mibw+1;
                 int cmdw = cols - fixed; if (cmdw < 10) cmdw = 10;
 
-                // Headers aligned to match %*.*f formatting
                 char h_pid[32], h_cpu[32], h_ri[32], h_wi[32], h_rm[32], h_wm[32], h_wt[32];
                 snprintf(h_pid, 32, "[1] %s", "PID");
                 snprintf(h_cpu, 32, "[2] %s", "CPU%%");
@@ -466,26 +423,27 @@ int main(int argc, char **argv) {
                 for(int i=0; i<cols; i++) putchar('-');
                 putchar('\n');
 
-                // Calculate Totals
+                // Calculate Totals (from Raw to be accurate)
                 double t_cpu=0, t_ri=0, t_wi=0, t_rm=0, t_wm=0, t_wt=0;
-                for(size_t i=0; i<curr.len; i++) {
-                    t_cpu += curr.data[i].cpu_pct;
-                    t_ri  += curr.data[i].r_iops;
-                    t_wi  += curr.data[i].w_iops;
-                    t_rm  += curr.data[i].r_mib;
-                    t_wm  += curr.data[i].w_mib;
-                    t_wt  += curr.data[i].io_wait_ms;
+                for(size_t i=0; i<curr_raw.len; i++) {
+                    t_cpu += curr_raw.data[i].cpu_pct;
+                    t_ri  += curr_raw.data[i].r_iops;
+                    t_wi  += curr_raw.data[i].w_iops;
+                    t_rm  += curr_raw.data[i].r_mib;
+                    t_wm  += curr_raw.data[i].w_mib;
+                    t_wt  += curr_raw.data[i].io_wait_ms;
                 }
 
                 int limit = display_limit; 
-                if ((size_t)limit > curr.len) limit = curr.len;
+                if ((size_t)limit > view_list->len) limit = view_list->len;
                 
                 for (int i=0; i<limit; i++) {
-                    const sample_t *c = &curr.data[i];
-                    char pidbuf[32];
-                    if (include_threads) snprintf(pidbuf, sizeof(pidbuf), "%d:%d", c->pid, c->tid);
-                    else snprintf(pidbuf, sizeof(pidbuf), "%d", c->pid);
+                    const sample_t *c = &view_list->data[i]; // 'c' is an aggregated PROCESS
                     
+                    char pidbuf[32];
+                    snprintf(pidbuf, sizeof(pidbuf), "%d", c->tgid);
+                    
+                    // Highlight process row in Tree mode?
                     printf("%*s %*.*f %*.*f %*.*f %*.*f %*.*f %*.*f ",
                         pidw, pidbuf,
                         cpuw, 2, c->cpu_pct,
@@ -496,9 +454,12 @@ int main(int argc, char **argv) {
                         mibw, 2, c->w_mib);
                     fprint_trunc(stdout, c->cmd, cmdw);
                     putchar('\n');
+
+                    if (show_tree) {
+                        print_threads_for_tgid(&curr_raw, c->tgid, cols, pidw, cpuw, iopsw, waitw, mibw, cmdw);
+                    }
                 }
 
-                // Print Total Row
                 for(int i=0; i<cols; i++) putchar('-');
                 putchar('\n');
                 printf("%*s %*.*f %*.*f %*.*f %*.*f %*.*f %*.*f \n",
@@ -509,7 +470,8 @@ int main(int argc, char **argv) {
                         waitw, 2, t_wt,
                         mibw, 2, t_rm,
                         mibw, 2, t_wm);
-
+                fflush(stdout);
+                dirty = 0;
             }
 
             double elapsed = now_monotonic() - start_wait;
@@ -519,6 +481,7 @@ int main(int argc, char **argv) {
             int c = wait_for_input(remain);
             if (c > 0) {
                 if (c == 'q' || c == 'Q') goto cleanup;
+                if (c == 't' || c == 'T') { show_tree = !show_tree; dirty = 1; } // Toggle Tree
                 if (c == '1' || c == 0x01) { sort_col = SORT_PID; dirty = 1; }
                 if (c == '2' || c == 0x02) { sort_col = SORT_CPU; dirty = 1; }
                 if (c == '3' || c == 0x03) { sort_col = SORT_RIOPS; dirty = 1; }
@@ -530,15 +493,23 @@ int main(int argc, char **argv) {
             }
         }
 
-        qsort(curr.data, curr.len, sizeof(sample_t), cmp_key);
-        vec_free(&prev); prev = curr; vec_init(&curr);
+        // Prepare for next frame: PREV gets the current RAW data
+        qsort(curr_raw.data, curr_raw.len, sizeof(sample_t), cmp_key);
+        vec_free(&prev); 
+        // Deep copy curr_raw to prev or just swap?
+        // We can just swap pointers, but we need to re-init curr_raw.
+        // vec_t prev = curr_raw; NO, memory management.
+        // Easier:
+        prev = curr_raw; // Transfer ownership of data
+        vec_init(&curr_raw); // Reset curr for next loop
         t_prev = t_curr;
     }
 
 cleanup:
     disable_raw_mode();
     vec_free(&prev);
-    vec_free(&curr);
+    vec_free(&curr_raw);
+    vec_free(&curr_proc);
     free(filter);
     return 0;
 }
