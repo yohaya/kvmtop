@@ -23,12 +23,52 @@
 
 #define KVM_VERSION "v1.0.1"
 
-// --- Terminal Handling ---
-static struct termios orig_termios;
-static int raw_mode_enabled = 0;
+// --- Data Structures ---
+typedef struct {
+    pid_t pid;  // This is the TID (Thread ID)
+    pid_t tgid; // This is the Process ID (Thread Group ID)
+    uint64_t key; // Unique key (usually just pid/tid)
 
-static void disable_raw_mode() {
-    if (raw_mode_enabled) {
+    uint64_t syscr;
+    uint64_t syscw;
+    uint64_t read_bytes;
+    uint64_t write_bytes;
+    uint64_t cpu_jiffies;
+    uint64_t blkio_ticks;
+
+    double cpu_pct;
+    double r_iops;
+    double w_iops;
+    double io_wait_ms;
+    double r_mib;
+    double w_mib;
+
+    char cmd[CMD_MAX];
+} sample_t;
+
+typedef struct {
+    sample_t *data;
+    size_t len;
+    size_t cap;
+} vec_t;
+
+static void vec_init(vec_t *v) { v->data=NULL; v->len=0; v->cap=0; }
+static void vec_free(vec_t *v) { free(v->data); v->data=NULL; v->len=0; v->cap=0; }
+static void vec_push(vec_t *v, const sample_t *item) {
+    if (v->len == v->cap) {
+        size_t new_cap = v->cap ? v->cap * 2 : 4096;
+        sample_t *p = (sample_t *)realloc(v->data, new_cap * sizeof(*p));
+        if (!p) { fprintf(stderr, "OOM\n"); exit(2); }
+        v->data = p;
+        v->cap = new_cap;
+    }
+    v->data[v->len++] = *item;
+}
+
+static uint64_t make_key(pid_t tid) {
+    return (uint64_t)tid; 
+}
+
         tcsetattr(STDIN_FILENO, TCSAFLUSH, &orig_termios);
         raw_mode_enabled = 0;
         printf("\033[?25h"); 
@@ -64,36 +104,13 @@ static int wait_for_input(double seconds) {
     return 0; // Timeout
 }
 
-// --- Data Structures ---
-typedef struct {
-    pid_t pid;  // This is the TID (Thread ID)
-    pid_t tgid; // This is the Process ID (Thread Group ID)
-    uint64_t key; // Unique key (usually just pid/tid)
-
-    uint64_t syscr;
-    uint64_t syscw;
-    uint64_t read_bytes;
-    uint64_t write_bytes;
-    uint64_t cpu_jiffies;
-    uint64_t blkio_ticks;
-
-    double cpu_pct;
-    double r_iops;
-    double w_iops;
-    double io_wait_ms;
-    double r_mib;
-    double w_mib;
-
-    char cmd[CMD_MAX];
-} sample_t;
-
-// ... (vec_t funcs) ...
-
-static uint64_t make_key(pid_t tid) {
-    return (uint64_t)tid; 
+static int is_numeric_str(const char *s) {
+    if (!s || !*s) return 0;
+    for (const unsigned char *p = (const unsigned char *)s; *p; ++p) if (!isdigit(*p)) return 0;
+    return 1;
 }
 
-// ... (helpers) ...
+static double now_monotonic(void) {
 
 static int collect_samples(vec_t *out, const pid_t *filter_pids, size_t filter_n) {
     DIR *proc = opendir("/proc");
