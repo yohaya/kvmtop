@@ -129,6 +129,44 @@ static int get_term_cols(void) {
     return cols;
 }
 
+// --- Disk Stats ---
+static int read_system_disk_iops(uint64_t *r_iops, uint64_t *w_iops) {
+    FILE *f = fopen("/proc/diskstats", "r");
+    if (!f) return -1;
+    
+    char line[512];
+    uint64_t tr = 0, tw = 0;
+    
+    while (fgets(line, sizeof(line), f)) {
+        int major, minor;
+        char name[64];
+        uint64_t rio, rmerge, rsect, ruse;
+        uint64_t wio, wmerge, wsect, wuse;
+        
+        // Fields: major minor name rio rmerge rsect ruse wio wmerge wsect wuse ...
+        if (sscanf(line, "%d %d %s %llu %llu %llu %llu %llu %llu %llu %llu",
+                   &major, &minor, name,
+                   &rio, &rmerge, &rsect, &ruse,
+                   &wio, &wmerge, &wsect, &wuse) == 11) {
+            
+            // Filter common physical devices: sd*, vd*, nvme*
+            // Skip ram, loop, dm (unless dm is main, but usually sd/vd/nvme is underlying)
+            // Simplest heuristic: name starts with sd, vd, nvme, xvd
+            if (strncmp(name, "sd", 2) == 0 || 
+                strncmp(name, "vd", 2) == 0 ||
+                strncmp(name, "nvme", 4) == 0 ||
+                strncmp(name, "xvd", 3) == 0) {
+                tr += rio;
+                tw += wio;
+            }
+        }
+    }
+    fclose(f);
+    *r_iops = tr;
+    *w_iops = tw;
+    return 0;
+}
+
 static void fprint_trunc(FILE *out, const char *s, int width) {
     if (width <= 0) return;
     int len = (int)strlen(s);
@@ -440,8 +478,13 @@ int main(int argc, char **argv) {
     vec_t prev, curr_raw, curr_proc;
     vec_init(&prev); vec_init(&curr_raw); vec_init(&curr_proc);
     
+    // System Disk Stats
+    uint64_t prev_sys_r=0, prev_sys_w=0;
+    uint64_t curr_sys_r=0, curr_sys_w=0;
+    read_system_disk_iops(&prev_sys_r, &prev_sys_w);
+
     printf("Initializing (wait %.0fs)...\n", interval);
-    // Initial collection (always collect threads)
+    
     if (collect_samples(&prev, filter, filter_n) != 0) return 1;
     qsort(prev.data, prev.len, sizeof(sample_t), cmp_key);
     double t_prev = now_monotonic();
@@ -453,9 +496,16 @@ int main(int argc, char **argv) {
         vec_free(&curr_raw); vec_init(&curr_raw);
         if (collect_samples(&curr_raw, filter, filter_n) != 0) break;
         
+        // System Disk Update
+        read_system_disk_iops(&curr_sys_r, &curr_sys_w);
+
         double t_curr = now_monotonic();
         double dt = t_curr - t_prev;
         if (dt <= 0) dt = interval;
+
+        // System IOPS Calc
+        double sys_r_iops = (double)(curr_sys_r - prev_sys_r) / dt;
+        double sys_w_iops = (double)(curr_sys_w - prev_sys_w) / dt;
 
         // 1. Calculate Metrics for ALL threads (Raw)
         for (size_t i=0; i<curr_raw.len; i++) {
@@ -506,6 +556,9 @@ int main(int argc, char **argv) {
                 int pad = cols - (int)strlen(left) - (int)strlen(right);
                 if (pad < 1) pad = 1;
                 printf("%s%*s%s\n", left, pad, "", right);
+
+                // System Stats Line
+                printf("System IOPS: Read %.0f | Write %.0f\n", sys_r_iops, sys_w_iops);
 
                 int pidw = 14; 
                 int cpuw = 8, mibw = 10, waitw=10;
@@ -598,6 +651,8 @@ int main(int argc, char **argv) {
         prev = curr_raw; // Transfer ownership of data
         vec_init(&curr_raw); // Reset curr for next loop
         t_prev = t_curr;
+        prev_sys_r = curr_sys_r;
+        prev_sys_w = curr_sys_w;
     }
 
 cleanup:
