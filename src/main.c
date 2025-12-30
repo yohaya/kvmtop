@@ -437,22 +437,30 @@ int main(int argc, char **argv) {
                 int fixed = pidw+1 + cpuw+1 + iopsw+1 + iopsw+1 + mibw+1 + mibw+1;
                 int cmdw = cols - fixed; if (cmdw < 10) cmdw = 10;
 
-                // Headers aligned to match %%*.*f formatting
+                // Headers aligned to match %*.*f formatting
                 char h_pid[32], h_cpu[32], h_ri[32], h_wi[32], h_rm[32], h_wm[32];
                 snprintf(h_pid, 32, "[1] %s", "PID");
                 snprintf(h_cpu, 32, "[2] %s", "CPU%%");
-                snprintf(h_ri, 32, "[3] %s", "R_IOPS");
-                snprintf(h_wi, 32, "[4] %s", "W_IOPS");
+                snprintf(h_ri, 32, "[3] %s", "R_Sys");
+                snprintf(h_wi, 32, "[4] %s", "W_Sys");
                 snprintf(h_rm, 32, "[5] %s", "R_MiB/s");
                 snprintf(h_wm, 32, "[6] %s", "W_MiB/s");
 
-                printf("%*s %*s %*s %*s %*s %*s ",
-                    pidw, h_pid, cpuw, h_cpu, iopsw, h_ri, iopsw, h_wi, mibw, h_rm, mibw, h_wm);
-                fprint_trunc(stdout, "COMMAND", cmdw);
-                printf("\n");
+                printf("%*s %*s %*s %*s %*s %*s %s\n",
+                    pidw, h_pid, cpuw, h_cpu, iopsw, h_ri, iopsw, h_wi, mibw, h_rm, mibw, h_wm, "COMMAND");
                 
                 for(int i=0; i<cols; i++) putchar('-');
                 putchar('\n');
+
+                // Calculate Totals
+                double t_cpu=0, t_ri=0, t_wi=0, t_rm=0, t_wm=0;
+                for(size_t i=0; i<curr.len; i++) {
+                    t_cpu += curr.data[i].cpu_pct;
+                    t_ri  += curr.data[i].r_iops;
+                    t_wi  += curr.data[i].w_iops;
+                    t_rm  += curr.data[i].r_mib;
+                    t_wm  += curr.data[i].w_mib;
+                }
 
                 int limit = display_limit; 
                 if ((size_t)limit > curr.len) limit = curr.len;
@@ -463,16 +471,27 @@ int main(int argc, char **argv) {
                     if (include_threads) snprintf(pidbuf, sizeof(pidbuf), "%d:%d", c->pid, c->tid);
                     else snprintf(pidbuf, sizeof(pidbuf), "%d", c->pid);
                     
-                    printf("%*s %*.*f %*.*f %*.*f %*.*f %*.*f ",
+                    printf("%*s %*.*f %*.*f %*.*f %*.*f %*.*f %s\n",
                         pidw, pidbuf,
                         cpuw, 2, c->cpu_pct,
                         iopsw, 2, c->r_iops,
                         iopsw, 2, c->w_iops,
                         mibw, 2, c->r_mib,
-                        mibw, 2, c->w_mib);
-                    fprint_trunc(stdout, c->cmd, cmdw);
-                    putchar('\n');
+                        mibw, 2, c->w_mib,
+                        c->cmd);
                 }
+
+                // Print Total Row
+                for(int i=0; i<cols; i++) putchar('-');
+                putchar('\n');
+                printf("%*s %*.*f %*.*f %*.*f %*.*f %*.*f %s\n",
+                        pidw, "TOTAL",
+                        cpuw, 2, t_cpu,
+                        iopsw, 2, t_ri,
+                        iopsw, 2, t_wi,
+                        mibw, 2, t_rm,
+                        mibw, 2, t_wm,
+                        "");
                 fflush(stdout);
                 dirty = 0;
             }
