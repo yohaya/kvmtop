@@ -911,8 +911,7 @@ int main(int argc, char **argv) {
     memset(&curr_cpu, 0, sizeof(curr_cpu));
     read_global_cpu(&prev_cpu);
 
-    printf("Initializing (wait %.0fs)...
-", interval);
+    printf("Initializing (wait %.0fs)...\n", interval);
     
     if (collect_samples(&prev, filter, filter_n) != 0) return 1;
     collect_net_dev(&prev_net);
