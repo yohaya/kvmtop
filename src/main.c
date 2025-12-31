@@ -136,6 +136,20 @@ typedef struct {
 
 // --- Helper Functions ---
 
+static void fmt_u64_commas(char *buf, unsigned long long val) {
+    char tmp[64];
+    sprintf(tmp, "%llu", val);
+    int len = strlen(tmp);
+    int out_idx = 0;
+    int leading = len % 3;
+    if (leading == 0 && len > 0) leading = 3;
+    for(int i=0; i<len; i++) {
+        if (i > 0 && (len - i) % 3 == 0) buf[out_idx++] = ',';
+        buf[out_idx++] = tmp[i];
+    }
+    buf[out_idx] = '\0';
+}
+
 static void vec_init(vec_t *v) { v->data=NULL; v->len=0; v->cap=0; }
 static void vec_free(vec_t *v) { free(v->data); v->data=NULL; v->len=0; v->cap=0; }
 static void vec_push(vec_t *v, const sample_t *item) {
@@ -457,23 +471,6 @@ static int read_global_cpu(global_cpu_t *cpu) {
     }
     fclose(f);
     return 0;
-}
-
-static int read_loadavg_threads(void) {
-    FILE *f = fopen("/proc/loadavg", "r");
-    if (!f) return 0;
-    char line[256];
-    int threads = 0;
-    if (fgets(line, sizeof(line), f)) {
-        char *slash = strchr(line, '/');
-        if (slash) {
-            // "1/845" -> slash points to /
-            // The number after slash is total threads
-            threads = atoi(slash + 1);
-        }
-    }
-    fclose(f);
-    return threads;
 }
 
 static int collect_disks(vec_disk_t *out) {
@@ -832,7 +829,7 @@ static void print_threads_for_tgid(const vec_t *raw, pid_t tgid, int pidw, int c
             char pidbuf[32];
             snprintf(pidbuf, sizeof(pidbuf), "  └─ %d", s->pid); // Indent
             
-            printf("%*s %*.*f %*.0f %*.0f %*.*f %*.*f %*.*f   %c   ",
+            printf("%*s %*.*f %*.0f %*.0f %*.*f %*.*f %*.*f  %c   ",
                 pidw, pidbuf,
                 cpuw, 2, s->cpu_pct,
                 iopsw, s->r_iops,
@@ -943,9 +940,10 @@ int main(int argc, char **argv) {
             collect_disks(&curr_disk);
 
             read_global_cpu(&curr_cpu);
-            system_threads = read_loadavg_threads();
+            system_threads = (int)sysconf(_SC_NPROCESSORS_ONLN);
 
             t_curr = now_monotonic();
+
             double dt = t_curr - t_prev;
             if (dt <= 0) dt = interval;
 
@@ -1075,15 +1073,21 @@ int main(int argc, char **argv) {
 
                 struct sysinfo si;
                 sysinfo(&si);
-                double total_ram = (double)si.totalram * si.mem_unit / 1048576.0;
-                double used_ram = total_ram - ((double)si.freeram * si.mem_unit / 1048576.0) - ((double)si.bufferram * si.mem_unit / 1048576.0);
-                double total_swap = (double)si.totalswap * si.mem_unit / 1048576.0;
-                double used_swap = total_swap - ((double)si.freeswap * si.mem_unit / 1048576.0);
+                unsigned long long total_ram = (unsigned long long)si.totalram * si.mem_unit / 1048576;
+                unsigned long long used_ram = total_ram - ((unsigned long long)si.freeram * si.mem_unit / 1048576) - ((unsigned long long)si.bufferram * si.mem_unit / 1048576);
+                unsigned long long total_swap = (unsigned long long)si.totalswap * si.mem_unit / 1048576;
+                unsigned long long used_swap = total_swap - ((unsigned long long)si.freeswap * si.mem_unit / 1048576);
                 
-                printf("CPU: %5.2f%% (%d Threads) | RAM: %.0f / %.0f MiB (%.1f%%) | SWAP: %.0f / %.0f MiB (%.1f%%)\n",
+                char s_tram[32], s_uram[32], s_tswap[32], s_uswap[32];
+                fmt_u64_commas(s_tram, total_ram);
+                fmt_u64_commas(s_uram, used_ram);
+                fmt_u64_commas(s_tswap, total_swap);
+                fmt_u64_commas(s_uswap, used_swap);
+
+                printf("CPU: %5.2f%% (%d Threads) | RAM: %s / %s MiB (%.1f%%) | SWAP: %s / %s MiB (%.1f%%)\n",
                     global_cpu_percent, system_threads,
-                    used_ram, total_ram, (total_ram > 0) ? (used_ram / total_ram * 100.0) : 0.0,
-                    used_swap, total_swap, (total_swap > 0) ? (used_swap / total_swap * 100.0) : 0.0);
+                    s_uram, s_tram, (total_ram > 0) ? ((double)used_ram / (double)total_ram * 100.0) : 0.0,
+                    s_uswap, s_tswap, (total_swap > 0) ? ((double)used_swap / (double)total_swap * 100.0) : 0.0);
 
                 if (mode == MODE_NETWORK) {
                     if (sort_col_net == SORT_NET_RX) 
@@ -1262,7 +1266,7 @@ int main(int argc, char **argv) {
                         if (days > 0) snprintf(uptime_buf, 32, "%dd%02dh", days, hrs);
                         else snprintf(uptime_buf, 32, "%02d:%02d:%02d", hrs, mins, secs);
 
-                        printf("%*s %-*s %*s %*.0f %*.0f %*.0f %*.0f %*.0f %*.*f %*.*f %*.*f %*.*f   %c   ",
+                        printf("%*s %-*s %*s %*.0f %*.0f %*.0f %*.0f %*.0f %*.*f %*.*f %*.*f %*.*f  %c   ",
                             pidw, pidbuf,
                             userw, c->user,
                             uptimew, uptime_buf,
