@@ -829,7 +829,7 @@ static void print_threads_for_tgid(const vec_t *raw, pid_t tgid, int pidw, int c
             char pidbuf[32];
             snprintf(pidbuf, sizeof(pidbuf), "  └─ %d", s->pid); // Indent
             
-            printf("%*s %*.*f %*.0f %*.0f %*.*f %*.*f %*.*f  %c   ",
+            printf("%*s %*.*f %*.0f %*.0f %*.*f %*.*f %*.*f %*c ",
                 pidw, pidbuf,
                 cpuw, 2, s->cpu_pct,
                 iopsw, s->r_iops,
@@ -837,7 +837,7 @@ static void print_threads_for_tgid(const vec_t *raw, pid_t tgid, int pidw, int c
                 waitw, 2, s->io_wait_ms,
                 mibw, 2, s->r_mib,
                 mibw, 2, s->w_mib,
-                s->state);
+                statew, s->state);
             fprint_trunc(stdout, s->cmd, cmdw);
             putchar('\n');
         }
@@ -1168,8 +1168,8 @@ int main(int argc, char **argv) {
                             iopsw, 2, d->w_iops,
                             mibw, 2, d->r_mib,
                             mibw, 2, d->w_mib,
-                            latw, 2, d->r_lat,
-                            latw, 2, d->w_lat);
+                            latw, 4, d->r_lat,
+                            latw, 4, d->w_lat);
                     }
                 } else { // MODE_PROCESS
                     vec_t *view_list = &curr_proc; 
@@ -1266,7 +1266,7 @@ int main(int argc, char **argv) {
                         if (days > 0) snprintf(uptime_buf, 32, "%dd%02dh", days, hrs);
                         else snprintf(uptime_buf, 32, "%02d:%02d:%02d", hrs, mins, secs);
 
-                        printf("%*s %-*s %*s %*.0f %*.0f %*.0f %*.0f %*.0f %*.*f %*.*f %*.*f %*.*f  %c   ",
+                        printf("%*s %-*s %*s %*.0f %*.0f %*.0f %*.0f %*.0f %*.*f %*.*f %*.*f %*.*f %*c ",
                             pidw, pidbuf,
                             userw, c->user,
                             uptimew, uptime_buf,
@@ -1276,10 +1276,10 @@ int main(int argc, char **argv) {
                             iopsw, c->r_iops,
                             iopsw, c->w_iops,
                             waitw, 2, c->io_wait_ms,
-                            mibw, 0, c->r_mib,
-                            mibw, 0, c->w_mib,
+                            mibw, 2, c->r_mib,
+                            mibw, 2, c->w_mib,
                             cpuw, 2, c->cpu_pct,
-                            c->state);
+                            statew, c->state);
                         fprint_trunc(stdout, c->cmd, cmdw);
                         putchar('\n');
 
