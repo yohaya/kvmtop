@@ -1,0 +1,85 @@
+name: Dev Build and Release
+
+on:
+  push:
+    branches:
+      - dev
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container: alpine:latest
+
+    steps:
+    - name: Install dependencies
+      run: apk add --no-cache build-base git
+
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Generate Version Tag
+      id: tag
+      run: echo "VERSION=dev-$(date +'%Y.%m.%d').${{ github.run_number }}" >> $GITHUB_ENV
+
+    - name: Build
+      run: |
+        make VERSION=${{ env.VERSION }}
+        mv build/kvmtop build/kvmtop-static-linux-amd64
+
+    - name: Upload Build Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: kvmtop-dev-build
+        path: build/kvmtop-static-linux-amd64
+
+    - name: Release Development Version
+      uses: softprops/action-gh-release@v1
+      with:
+        tag_name: ${{ env.VERSION }}
+        name: Development Build ${{ env.VERSION }}
+        body: |
+          Automated development build from dev branch
+
+          **Commit:** ${{ github.sha }}
+          **Build Date:** $(date -u +'%Y-%m-%d %H:%M:%S UTC')
+
+          ⚠️ This is a pre-release build from the development branch. Use at your own risk.
+        files: build/kvmtop-static-linux-amd64
+        draft: false
+        prerelease: true
+
+    - name: Update Dev-Latest Tag
+      uses: softprops/action-gh-release@v1
+      with:
+        tag_name: dev-latest
+        name: Latest Development Build
+        body: |
+          Latest automated build from dev branch
+
+          **Version:** ${{ env.VERSION }}
+          **Commit:** ${{ github.sha }}
+
+          ⚠️ This is a rolling pre-release tag that always points to the latest dev build.
+        files: build/kvmtop-static-linux-amd64
+        draft: false
+        prerelease: true
+
+    - name: Cleanup Old Dev Releases
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        # Get list of dev releases sorted by date (newest first), exclude 'dev-latest'
+        releases=$(gh release list --exclude-drafts --limit 100 | grep "^dev-" | grep -v "dev-latest" | awk '{print $3}')
+
+        # Keep top 5 dev releases
+        count=0
+        for tag in $releases; do
+          count=$((count+1))
+          if [ "$count" -gt 5 ]; then
+            echo "Deleting old dev release: $tag"
+            gh release delete "$tag" --cleanup-tag -y || true
+          fi
+        done
