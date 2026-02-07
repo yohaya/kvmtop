@@ -782,7 +782,7 @@ static int sort_desc = 1;
 // Sort Comparators
 typedef enum { 
     SORT_PID=1, SORT_CPU, SORT_LOG_R, SORT_LOG_W, SORT_WAIT, SORT_RMIB, SORT_WMIB, SORT_STATE,
-    SORT_NET_RX, SORT_NET_TX,
+    SORT_NET_RX, SORT_NET_TX, SORT_NET_RX_PKT, SORT_NET_TX_PKT, SORT_NET_RX_ERR, SORT_NET_TX_ERR,
     SORT_MEM_RES, SORT_MEM_SHR, SORT_MEM_VIRT, SORT_USER, SORT_UPTIME,
     // Disk specific
     SORT_DISK_RIO, SORT_DISK_WIO, SORT_DISK_RMIB, SORT_DISK_WMIB, SORT_DISK_RLAT, SORT_DISK_WLAT
@@ -840,6 +840,26 @@ static int cmp_net_tx(const void *a, const void *b) {
     const net_iface_t *x = (const net_iface_t *)a;
     const net_iface_t *y = (const net_iface_t *)b;
     return CMP_NUM(x->tx_mbps, y->tx_mbps);
+}
+static int cmp_net_rx_pkt(const void *a, const void *b) {
+    const net_iface_t *x = (const net_iface_t *)a;
+    const net_iface_t *y = (const net_iface_t *)b;
+    return CMP_NUM(x->rx_pps, y->rx_pps);
+}
+static int cmp_net_tx_pkt(const void *a, const void *b) {
+    const net_iface_t *x = (const net_iface_t *)a;
+    const net_iface_t *y = (const net_iface_t *)b;
+    return CMP_NUM(x->tx_pps, y->tx_pps);
+}
+static int cmp_net_rx_err(const void *a, const void *b) {
+    const net_iface_t *x = (const net_iface_t *)a;
+    const net_iface_t *y = (const net_iface_t *)b;
+    return CMP_NUM(x->rx_errs_ps, y->rx_errs_ps);
+}
+static int cmp_net_tx_err(const void *a, const void *b) {
+    const net_iface_t *x = (const net_iface_t *)a;
+    const net_iface_t *y = (const net_iface_t *)b;
+    return CMP_NUM(x->tx_errs_ps, y->tx_errs_ps);
 }
 static int cmp_disk_rio(const void *a, const void *b) {
     const disk_sample_t *x = (const disk_sample_t *)a;
@@ -1210,21 +1230,23 @@ int main(int argc, char **argv) {
                     s_uswap, s_tswap, (total_swap > 0) ? ((double)used_swap / (double)total_swap * 100.0) : 0.0);
 
                 if (mode == MODE_NETWORK) {
-                    if (sort_col_net == SORT_NET_RX) 
-                        qsort(curr_net.data, curr_net.len, sizeof(net_iface_t), cmp_net_rx);
-                    else
-                        qsort(curr_net.data, curr_net.len, sizeof(net_iface_t), cmp_net_tx);
+                    switch(sort_col_net) {
+                        case SORT_NET_RX: qsort(curr_net.data, curr_net.len, sizeof(net_iface_t), cmp_net_rx); break;
+                        case SORT_NET_TX: qsort(curr_net.data, curr_net.len, sizeof(net_iface_t), cmp_net_tx); break;
+                        case SORT_NET_RX_PKT: qsort(curr_net.data, curr_net.len, sizeof(net_iface_t), cmp_net_rx_pkt); break;
+                        case SORT_NET_TX_PKT: qsort(curr_net.data, curr_net.len, sizeof(net_iface_t), cmp_net_tx_pkt); break;
+                        case SORT_NET_RX_ERR: qsort(curr_net.data, curr_net.len, sizeof(net_iface_t), cmp_net_rx_err); break;
+                        case SORT_NET_TX_ERR: qsort(curr_net.data, curr_net.len, sizeof(net_iface_t), cmp_net_tx_err); break;
+                        default: qsort(curr_net.data, curr_net.len, sizeof(net_iface_t), cmp_net_rx); break;
+                    }
 
-                    int namew=16, statw=10, ratew=12, pktw=10, errw=8;
-                    char h_rx[32], h_tx[32];
-                    snprintf(h_rx, 32, "[1] %s", "RX_Mbps");
-                    snprintf(h_tx, 32, "[2] %s", "TX_Mbps");
+                    int namew=16, statw=10, ratew=12, pktw=12, errw=10;
 
                     printf(CLR_COLHDR "%*s %*s %*s %*s %*s %*s %*s %*s %-6s %s" CLR_RESET "\n",
                         namew, "IFACE", statw, "STATE",
-                        ratew, h_rx, ratew, h_tx,
-                        pktw, "RX_Pkts", pktw, "TX_Pkts",
-                        errw, "RX_Err", errw, "TX_Err",
+                        ratew, "[1] RX_Mbps", ratew, "[2] TX_Mbps",
+                        pktw, "[3] RX_Pkts", pktw, "[4] TX_Pkts",
+                        errw, "[5] RX_Err", errw, "[6] TX_Err",
                         "VMID", "VM_NAME");
                     printf(CLR_SEPARATOR);
                     for(int i=0; i<cols; i++) printf("\xe2\x94\x80");
@@ -1293,7 +1315,7 @@ int main(int argc, char **argv) {
                         char showbuf[128];
                         snprintf(showbuf, sizeof(showbuf), "Showing %d-%d of %d",
                             scroll_offset + 1, end_row > 0 ? end_row : 0, net_fcount);
-                        printf("\033[%d;1H", term_rows - 1);
+                        printf("\033[%d;1H\033[2K", term_rows - 1);
                         printf(CLR_SCROLLINFO "%*s" CLR_RESET, cols, showbuf);
                     }
                 } else if (mode == MODE_STORAGE) {
@@ -1377,7 +1399,7 @@ int main(int argc, char **argv) {
                         char showbuf[128];
                         snprintf(showbuf, sizeof(showbuf), "Showing %d-%d of %d",
                             scroll_offset + 1, end_row > 0 ? end_row : 0, disk_fcount);
-                        printf("\033[%d;1H", term_rows - 1);
+                        printf("\033[%d;1H\033[2K", term_rows - 1);
                         printf(CLR_SCROLLINFO "%*s" CLR_RESET, cols, showbuf);
                     }
                 } else { // MODE_PROCESS
@@ -1607,7 +1629,7 @@ int main(int argc, char **argv) {
                         char showbuf[128];
                         snprintf(showbuf, sizeof(showbuf), "Showing %d-%d of %d%s",
                             scroll_offset + 1, end_row > 0 ? end_row : 0, filtered_count, mode_tag);
-                        printf("\033[%d;1H", term_rows - 1);
+                        printf("\033[%d;1H\033[2K", term_rows - 1);
                         printf(CLR_SCROLLINFO "%*s" CLR_RESET, cols, showbuf);
                     }
                 }
@@ -1747,6 +1769,10 @@ int main(int argc, char **argv) {
                     } else if (mode == MODE_NETWORK) {
                         if (c == '1' || c == 0x01) { if (sort_col_net == SORT_NET_RX) sort_desc = !sort_desc; else { sort_col_net = SORT_NET_RX; sort_desc = 1; } dirty = 1; }
                         if (c == '2' || c == 0x02) { if (sort_col_net == SORT_NET_TX) sort_desc = !sort_desc; else { sort_col_net = SORT_NET_TX; sort_desc = 1; } dirty = 1; }
+                        if (c == '3' || c == 0x03) { if (sort_col_net == SORT_NET_RX_PKT) sort_desc = !sort_desc; else { sort_col_net = SORT_NET_RX_PKT; sort_desc = 1; } dirty = 1; }
+                        if (c == '4' || c == 0x04) { if (sort_col_net == SORT_NET_TX_PKT) sort_desc = !sort_desc; else { sort_col_net = SORT_NET_TX_PKT; sort_desc = 1; } dirty = 1; }
+                        if (c == '5' || c == 0x05) { if (sort_col_net == SORT_NET_RX_ERR) sort_desc = !sort_desc; else { sort_col_net = SORT_NET_RX_ERR; sort_desc = 1; } dirty = 1; }
+                        if (c == '6' || c == 0x06) { if (sort_col_net == SORT_NET_TX_ERR) sort_desc = !sort_desc; else { sort_col_net = SORT_NET_TX_ERR; sort_desc = 1; } dirty = 1; }
                     }
 
                     if (mode == MODE_STORAGE) {
