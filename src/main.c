@@ -1230,29 +1230,74 @@ int main(int argc, char **argv) {
                     for(int i=0; i<cols; i++) printf("\xe2\x94\x80");
                     printf(CLR_RESET "\n");
 
-                    int count = 0;
-                    for(size_t i=0; i<curr_net.len && count < 50; i++) {
-                        net_iface_t *n = &curr_net.data[i];
-                        if (strncmp(n->name, "fw", 2) == 0 || strcmp(n->name, "lo")==0) continue;
+                    // Build filtered index list
+                    int *net_filtered = NULL;
+                    int net_fcount = 0;
+                    {
+                        int ncap = (int)curr_net.len;
+                        if (ncap < 16) ncap = 16;
+                        net_filtered = (int *)malloc(ncap * sizeof(int));
+                        for (size_t i = 0; i < curr_net.len; i++) {
+                            net_iface_t *n = &curr_net.data[i];
+                            if (strncmp(n->name, "fw", 2) == 0 || strcmp(n->name, "lo") == 0) continue;
+                            if (strlen(filter_str) > 0) {
+                                char vmid_buf[16] = "-";
+                                if (n->vmid > 0) snprintf(vmid_buf, sizeof(vmid_buf), "%d", n->vmid);
+                                if (!strcasestr(n->name, filter_str) &&
+                                    !strcasestr(n->operstate, filter_str) &&
+                                    !strcasestr(vmid_buf, filter_str) &&
+                                    !strcasestr(n->vm_name, filter_str)) continue;
+                            }
+                            net_filtered[net_fcount++] = (int)i;
+                        }
+                    }
+
+                    int term_rows = get_term_rows();
+                    int visible_rows = term_rows - 4 - 2; // header(4) + showing+bottombar(2)
+                    if (visible_rows < 1) visible_rows = 1;
+
+                    if (cursor_pos < 0) cursor_pos = 0;
+                    if (cursor_pos >= net_fcount) cursor_pos = net_fcount > 0 ? net_fcount - 1 : 0;
+                    if (cursor_pos < scroll_offset) scroll_offset = cursor_pos;
+                    if (cursor_pos >= scroll_offset + visible_rows) scroll_offset = cursor_pos - visible_rows + 1;
+                    int max_off = net_fcount - visible_rows;
+                    if (max_off < 0) max_off = 0;
+                    if (scroll_offset > max_off) scroll_offset = max_off;
+                    if (scroll_offset < 0) scroll_offset = 0;
+
+                    int lines_printed = 0;
+                    for (int fi = scroll_offset; fi < net_fcount && lines_printed < visible_rows; fi++) {
+                        net_iface_t *n = &curr_net.data[net_filtered[fi]];
+                        int is_highlighted = (fi == cursor_pos);
 
                         char vmid_buf[16] = "-";
                         if (n->vmid > 0) snprintf(vmid_buf, sizeof(vmid_buf), "%d", n->vmid);
 
-                        // FILTER CHECK
-                        if (strlen(filter_str) > 0) {
-                            if (!strcasestr(n->name, filter_str) && 
-                                !strcasestr(n->operstate, filter_str) &&
-                                !strcasestr(vmid_buf, filter_str) &&
-                                !strcasestr(n->vm_name, filter_str)) continue;
-                        }
-
-                        printf("%*s %*s %*.*f %*.*f %*.*f %*.*f %*.*f %*.*f %-6s %s\n",
+                        if (is_highlighted) printf(CLR_HIGHLIGHT);
+                        printf("%*s %*s %*.*f %*.*f %*.*f %*.*f %*.*f %*.*f %-6s %s",
                             namew, n->name, statw, n->operstate,
                             ratew, 2, n->rx_mbps, ratew, 2, n->tx_mbps,
                             pktw, 0, n->rx_pps, pktw, 0, n->tx_pps,
                             errw, 0, n->rx_errs_ps, errw, 0, n->tx_errs_ps,
                             vmid_buf, n->vm_name);
-                        count++;
+                        if (is_highlighted) printf(CLR_RESET);
+                        putchar('\n');
+                        lines_printed++;
+                    }
+                    free(net_filtered);
+
+                    // Showing info
+                    {
+                        char showbuf[128];
+                        if (net_fcount > visible_rows) {
+                            int end_row = scroll_offset + visible_rows;
+                            if (end_row > net_fcount) end_row = net_fcount;
+                            snprintf(showbuf, sizeof(showbuf), "Showing %d-%d of %d",
+                                scroll_offset + 1, end_row, net_fcount);
+                        } else {
+                            snprintf(showbuf, sizeof(showbuf), "Showing %d", net_fcount);
+                        }
+                        printf(CLR_SCROLLINFO "%*s" CLR_RESET, cols, showbuf);
                     }
                 } else if (mode == MODE_STORAGE) {
                     switch(sort_col_disk) {
@@ -1281,12 +1326,40 @@ int main(int argc, char **argv) {
                     for(int i=0; i<cols; i++) printf("\xe2\x94\x80");
                     printf(CLR_RESET "\n");
 
-                    for (size_t i=0; i<curr_disk.len; i++) {
-                        const disk_sample_t *d = &curr_disk.data[i];
-                        // Filter
-                        if (strlen(filter_str) > 0 && !strcasestr(d->name, filter_str)) continue;
+                    // Build filtered index list
+                    int *disk_filtered = NULL;
+                    int disk_fcount = 0;
+                    {
+                        int dcap = (int)curr_disk.len;
+                        if (dcap < 16) dcap = 16;
+                        disk_filtered = (int *)malloc(dcap * sizeof(int));
+                        for (size_t i = 0; i < curr_disk.len; i++) {
+                            const disk_sample_t *d = &curr_disk.data[i];
+                            if (strlen(filter_str) > 0 && !strcasestr(d->name, filter_str)) continue;
+                            disk_filtered[disk_fcount++] = (int)i;
+                        }
+                    }
 
-                        printf("%*s %*.*f %*.*f %*.*f %*.*f %*.*f %*.*f\n",
+                    int term_rows = get_term_rows();
+                    int visible_rows = term_rows - 4 - 2; // header(4) + showing+bottombar(2)
+                    if (visible_rows < 1) visible_rows = 1;
+
+                    if (cursor_pos < 0) cursor_pos = 0;
+                    if (cursor_pos >= disk_fcount) cursor_pos = disk_fcount > 0 ? disk_fcount - 1 : 0;
+                    if (cursor_pos < scroll_offset) scroll_offset = cursor_pos;
+                    if (cursor_pos >= scroll_offset + visible_rows) scroll_offset = cursor_pos - visible_rows + 1;
+                    int max_off = disk_fcount - visible_rows;
+                    if (max_off < 0) max_off = 0;
+                    if (scroll_offset > max_off) scroll_offset = max_off;
+                    if (scroll_offset < 0) scroll_offset = 0;
+
+                    int lines_printed = 0;
+                    for (int fi = scroll_offset; fi < disk_fcount && lines_printed < visible_rows; fi++) {
+                        const disk_sample_t *d = &curr_disk.data[disk_filtered[fi]];
+                        int is_highlighted = (fi == cursor_pos);
+
+                        if (is_highlighted) printf(CLR_HIGHLIGHT);
+                        printf("%*s %*.*f %*.*f %*.*f %*.*f %*.*f %*.*f",
                             devw, d->name,
                             iopsw, 2, d->r_iops,
                             iopsw, 2, d->w_iops,
@@ -1294,6 +1367,24 @@ int main(int argc, char **argv) {
                             mibw, 2, d->w_mib,
                             latw, 4, d->r_lat,
                             latw, 4, d->w_lat);
+                        if (is_highlighted) printf(CLR_RESET);
+                        putchar('\n');
+                        lines_printed++;
+                    }
+                    free(disk_filtered);
+
+                    // Showing info
+                    {
+                        char showbuf[128];
+                        if (disk_fcount > visible_rows) {
+                            int end_row = scroll_offset + visible_rows;
+                            if (end_row > disk_fcount) end_row = disk_fcount;
+                            snprintf(showbuf, sizeof(showbuf), "Showing %d-%d of %d",
+                                scroll_offset + 1, end_row, disk_fcount);
+                        } else {
+                            snprintf(showbuf, sizeof(showbuf), "Showing %d", disk_fcount);
+                        }
+                        printf(CLR_SCROLLINFO "%*s" CLR_RESET, cols, showbuf);
                     }
                 } else { // MODE_PROCESS
                     // Sort aggregated process list
@@ -1665,9 +1756,9 @@ int main(int argc, char **argv) {
                         if (c == '6' || c == 0x06) { if (sort_col_proc == SORT_RMIB) sort_desc = !sort_desc; else { sort_col_proc = SORT_RMIB; sort_desc = 1; } dirty = 1; }
                         if (c == '7' || c == 0x07) { if (sort_col_proc == SORT_WMIB) sort_desc = !sort_desc; else { sort_col_proc = SORT_WMIB; sort_desc = 1; } dirty = 1; }
                         if (c == '8' || c == 0x08) { if (sort_col_proc == SORT_STATE) sort_desc = !sort_desc; else { sort_col_proc = SORT_STATE; sort_desc = 1; } dirty = 1; }
-                    } else { // MODE_NETWORK
-                        if (c == '1' || c == 0x01) { sort_col_net = SORT_NET_RX; dirty = 1; }
-                        if (c == '2' || c == 0x02) { sort_col_net = SORT_NET_TX; dirty = 1; }
+                    } else if (mode == MODE_NETWORK) {
+                        if (c == '1' || c == 0x01) { if (sort_col_net == SORT_NET_RX) sort_desc = !sort_desc; else { sort_col_net = SORT_NET_RX; sort_desc = 1; } dirty = 1; }
+                        if (c == '2' || c == 0x02) { if (sort_col_net == SORT_NET_TX) sort_desc = !sort_desc; else { sort_col_net = SORT_NET_TX; sort_desc = 1; } dirty = 1; }
                     }
 
                     if (mode == MODE_STORAGE) {
