@@ -121,6 +121,8 @@ typedef struct {
     uint64_t rx_errors;
     uint64_t tx_errors;
 
+    int link_speed; // Mbps, -1 if unknown
+
     int vmid;
     char vm_name[64];
 
@@ -604,6 +606,18 @@ static int collect_net_dev(vec_net_t *out) {
         }
 
         read_operstate(ni.name, ni.operstate, sizeof(ni.operstate));
+
+        // Read link speed from sysfs
+        {
+            char speed_path[256], speed_buf[32];
+            ssize_t sn;
+            snprintf(speed_path, sizeof(speed_path), "/sys/class/net/%s/speed", ni.name);
+            if (read_small_file(speed_path, speed_buf, sizeof(speed_buf), &sn) == 0 && sn > 0)
+                ni.link_speed = atoi(speed_buf);
+            else
+                ni.link_speed = -1;
+        }
+
         vec_net_push(out, &ni);
     }
     fclose(f);
@@ -782,6 +796,7 @@ static int sort_desc = 1;
 // Sort Comparators
 typedef enum { 
     SORT_PID=1, SORT_CPU, SORT_LOG_R, SORT_LOG_W, SORT_WAIT, SORT_RMIB, SORT_WMIB, SORT_STATE,
+    SORT_NET_IFACE, SORT_NET_STATE, SORT_NET_SPEED,
     SORT_NET_RX, SORT_NET_TX, SORT_NET_RX_PKT, SORT_NET_TX_PKT, SORT_NET_RX_ERR, SORT_NET_TX_ERR,
     SORT_MEM_RES, SORT_MEM_SHR, SORT_MEM_VIRT, SORT_USER, SORT_UPTIME,
     // Disk specific
@@ -830,6 +845,23 @@ static int cmp_state(const void *a, const void *b) {
     const sample_t *x = (const sample_t *)a;
     const sample_t *y = (const sample_t *)b;
     return CMP_NUM(x->state, y->state);
+}
+static int cmp_net_iface(const void *a, const void *b) {
+    const net_iface_t *x = (const net_iface_t *)a;
+    const net_iface_t *y = (const net_iface_t *)b;
+    int r = strcmp(x->name, y->name);
+    return sort_desc ? -r : r;
+}
+static int cmp_net_state(const void *a, const void *b) {
+    const net_iface_t *x = (const net_iface_t *)a;
+    const net_iface_t *y = (const net_iface_t *)b;
+    int r = strcmp(x->operstate, y->operstate);
+    return sort_desc ? -r : r;
+}
+static int cmp_net_speed(const void *a, const void *b) {
+    const net_iface_t *x = (const net_iface_t *)a;
+    const net_iface_t *y = (const net_iface_t *)b;
+    return CMP_NUM(x->link_speed, y->link_speed);
 }
 static int cmp_net_rx(const void *a, const void *b) {
     const net_iface_t *x = (const net_iface_t *)a;
@@ -1231,6 +1263,9 @@ int main(int argc, char **argv) {
 
                 if (mode == MODE_NETWORK) {
                     switch(sort_col_net) {
+                        case SORT_NET_IFACE: qsort(curr_net.data, curr_net.len, sizeof(net_iface_t), cmp_net_iface); break;
+                        case SORT_NET_STATE: qsort(curr_net.data, curr_net.len, sizeof(net_iface_t), cmp_net_state); break;
+                        case SORT_NET_SPEED: qsort(curr_net.data, curr_net.len, sizeof(net_iface_t), cmp_net_speed); break;
                         case SORT_NET_RX: qsort(curr_net.data, curr_net.len, sizeof(net_iface_t), cmp_net_rx); break;
                         case SORT_NET_TX: qsort(curr_net.data, curr_net.len, sizeof(net_iface_t), cmp_net_tx); break;
                         case SORT_NET_RX_PKT: qsort(curr_net.data, curr_net.len, sizeof(net_iface_t), cmp_net_rx_pkt); break;
@@ -1240,16 +1275,16 @@ int main(int argc, char **argv) {
                         default: qsort(curr_net.data, curr_net.len, sizeof(net_iface_t), cmp_net_rx); break;
                     }
 
-                    int namew=16, statw=10, ratew=12, pktw=12, errw=10, vmidw=6;
-                    int fixed_net = namew+1+statw+1+ratew+1+ratew+1+pktw+1+pktw+1+errw+1+errw+1+vmidw+1;
+                    int namew=16, statw=10, speedw=8, ratew=12, pktw=12, errw=10, vmidw=6;
+                    int fixed_net = namew+1+statw+1+speedw+1+ratew+1+ratew+1+pktw+1+pktw+1+errw+1+errw+1+vmidw+1;
                     int vmnamew = cols - fixed_net;
                     if (vmnamew < 8) vmnamew = 8;
 
-                    printf(CLR_COLHDR "%*s %*s %*s %*s %*s %*s %*s %*s %-*s %-*s" CLR_RESET "\n",
-                        namew, "IFACE", statw, "STATE",
-                        ratew, "[1] RX_Mbps", ratew, "[2] TX_Mbps",
-                        pktw, "[3] RX_Pkts", pktw, "[4] TX_Pkts",
-                        errw, "[5] RX_Err", errw, "[6] TX_Err",
+                    printf(CLR_COLHDR "%*s %*s %*s %*s %*s %*s %*s %*s %*s %-*s %-*s" CLR_RESET "\n",
+                        namew, "[1] IFACE", statw, "[2] STATE", speedw, "[3] Speed",
+                        ratew, "[4] RX_Mbps", ratew, "[5] TX_Mbps",
+                        pktw, "[6] RX_Pkts", pktw, "[7] TX_Pkts",
+                        errw, "[8] RX_Err", errw, "[9] TX_Err",
                         vmidw, "VMID", vmnamew, "VM_NAME");
                     printf(CLR_SEPARATOR);
                     for(int i=0; i<cols; i++) printf("\xe2\x94\x80");
@@ -1298,9 +1333,18 @@ int main(int argc, char **argv) {
                         char vmid_buf[16] = "-";
                         if (n->vmid > 0) snprintf(vmid_buf, sizeof(vmid_buf), "%d", n->vmid);
 
+                        char speed_buf[16];
+                        if (n->link_speed > 0)
+                            snprintf(speed_buf, sizeof(speed_buf), "%dG", n->link_speed >= 1000 ? n->link_speed / 1000 : n->link_speed);
+                        else
+                            snprintf(speed_buf, sizeof(speed_buf), "-");
+                        // Show raw Mbps for sub-gigabit speeds
+                        if (n->link_speed > 0 && n->link_speed < 1000)
+                            snprintf(speed_buf, sizeof(speed_buf), "%dM", n->link_speed);
+
                         if (is_highlighted) printf(CLR_HIGHLIGHT);
-                        printf("%*s %*s %*.*f %*.*f %*.*f %*.*f %*.*f %*.*f %-*s %-*s",
-                            namew, n->name, statw, n->operstate,
+                        printf("%*s %*s %*s %*.*f %*.*f %*.*f %*.*f %*.*f %*.*f %-*s %-*s",
+                            namew, n->name, statw, n->operstate, speedw, speed_buf,
                             ratew, 2, n->rx_mbps, ratew, 2, n->tx_mbps,
                             pktw, 0, n->rx_pps, pktw, 0, n->tx_pps,
                             errw, 0, n->rx_errs_ps, errw, 0, n->tx_errs_ps,
@@ -1775,12 +1819,15 @@ int main(int argc, char **argv) {
                         if (c == '7' || c == 0x07) { if (sort_col_proc == SORT_WMIB) sort_desc = !sort_desc; else { sort_col_proc = SORT_WMIB; sort_desc = 1; } dirty = 1; }
                         if (c == '8' || c == 0x08) { if (sort_col_proc == SORT_STATE) sort_desc = !sort_desc; else { sort_col_proc = SORT_STATE; sort_desc = 1; } dirty = 1; }
                     } else if (mode == MODE_NETWORK) {
-                        if (c == '1' || c == 0x01) { if (sort_col_net == SORT_NET_RX) sort_desc = !sort_desc; else { sort_col_net = SORT_NET_RX; sort_desc = 1; } dirty = 1; }
-                        if (c == '2' || c == 0x02) { if (sort_col_net == SORT_NET_TX) sort_desc = !sort_desc; else { sort_col_net = SORT_NET_TX; sort_desc = 1; } dirty = 1; }
-                        if (c == '3' || c == 0x03) { if (sort_col_net == SORT_NET_RX_PKT) sort_desc = !sort_desc; else { sort_col_net = SORT_NET_RX_PKT; sort_desc = 1; } dirty = 1; }
-                        if (c == '4' || c == 0x04) { if (sort_col_net == SORT_NET_TX_PKT) sort_desc = !sort_desc; else { sort_col_net = SORT_NET_TX_PKT; sort_desc = 1; } dirty = 1; }
-                        if (c == '5' || c == 0x05) { if (sort_col_net == SORT_NET_RX_ERR) sort_desc = !sort_desc; else { sort_col_net = SORT_NET_RX_ERR; sort_desc = 1; } dirty = 1; }
-                        if (c == '6' || c == 0x06) { if (sort_col_net == SORT_NET_TX_ERR) sort_desc = !sort_desc; else { sort_col_net = SORT_NET_TX_ERR; sort_desc = 1; } dirty = 1; }
+                        if (c == '1' || c == 0x01) { if (sort_col_net == SORT_NET_IFACE) sort_desc = !sort_desc; else { sort_col_net = SORT_NET_IFACE; sort_desc = 0; } dirty = 1; }
+                        if (c == '2' || c == 0x02) { if (sort_col_net == SORT_NET_STATE) sort_desc = !sort_desc; else { sort_col_net = SORT_NET_STATE; sort_desc = 0; } dirty = 1; }
+                        if (c == '3' || c == 0x03) { if (sort_col_net == SORT_NET_SPEED) sort_desc = !sort_desc; else { sort_col_net = SORT_NET_SPEED; sort_desc = 1; } dirty = 1; }
+                        if (c == '4' || c == 0x04) { if (sort_col_net == SORT_NET_RX) sort_desc = !sort_desc; else { sort_col_net = SORT_NET_RX; sort_desc = 1; } dirty = 1; }
+                        if (c == '5' || c == 0x05) { if (sort_col_net == SORT_NET_TX) sort_desc = !sort_desc; else { sort_col_net = SORT_NET_TX; sort_desc = 1; } dirty = 1; }
+                        if (c == '6' || c == 0x06) { if (sort_col_net == SORT_NET_RX_PKT) sort_desc = !sort_desc; else { sort_col_net = SORT_NET_RX_PKT; sort_desc = 1; } dirty = 1; }
+                        if (c == '7' || c == 0x07) { if (sort_col_net == SORT_NET_TX_PKT) sort_desc = !sort_desc; else { sort_col_net = SORT_NET_TX_PKT; sort_desc = 1; } dirty = 1; }
+                        if (c == '8' || c == 0x08) { if (sort_col_net == SORT_NET_RX_ERR) sort_desc = !sort_desc; else { sort_col_net = SORT_NET_RX_ERR; sort_desc = 1; } dirty = 1; }
+                        if (c == '9' || c == 0x09) { if (sort_col_net == SORT_NET_TX_ERR) sort_desc = !sort_desc; else { sort_col_net = SORT_NET_TX_ERR; sort_desc = 1; } dirty = 1; }
                     }
 
                     if (mode == MODE_STORAGE) {
