@@ -24,6 +24,19 @@
 #define CMD_MAX 512
 #endif
 
+// ANSI color codes
+#define CLR_RESET       "\033[0m"
+#define CLR_BOLD        "\033[1m"
+#define CLR_DIM         "\033[2m"
+#define CLR_TITLE       "\033[1;37;44m"   // Bold white on blue
+#define CLR_SYSINFO     "\033[1;36m"      // Bold cyan
+#define CLR_COLHDR      "\033[1;30;42m"   // Bold black on green
+#define CLR_SEPARATOR   "\033[2;37m"      // Dim white
+#define CLR_TOTALS      "\033[1;33m"      // Bold yellow
+#define CLR_TREE        "\033[36m"        // Cyan
+#define CLR_BOTTOMBAR   "\033[1;37;46m"   // Bold white on cyan
+#define CLR_SCROLLINFO  "\033[1;35m"      // Bold magenta
+
 #ifndef KVM_VERSION
 #define KVM_VERSION "v1.0.1-dev"
 #endif
@@ -874,13 +887,27 @@ static void aggregate_by_tgid(const vec_t *src, vec_t *dst) {
     }
 }
 
-// Tree view helper
+// Tree view helper - htop-style tree connectors in COMMAND column
 static void print_threads_for_tgid(const vec_t *raw, pid_t tgid, int pidw, int userw, int uptimew, int memw, int iopsw, int waitw, int mibw, int cpuw, int statew, int cmdw) {
+    // First, count children to know which is last
+    size_t child_count = 0;
+    for (size_t i = 0; i < raw->len; i++) {
+        if (raw->data[i].tgid == tgid && raw->data[i].pid != tgid)
+            child_count++;
+    }
+
+    size_t child_idx = 0;
     for (size_t i = 0; i < raw->len; i++) {
         const sample_t *s = &raw->data[i];
         if (s->tgid == tgid && s->pid != tgid) {
+            child_idx++;
+            int is_last = (child_idx == child_count);
+
             char pidbuf[32];
-            snprintf(pidbuf, sizeof(pidbuf), "  └─ %d", s->pid); // Indent
+            snprintf(pidbuf, sizeof(pidbuf), "%d", s->pid);
+
+            // Tree connector: ├─ or └─ (each 2 display chars + space = 3 display chars)
+            const char *connector = is_last ? "\xe2\x94\x94\xe2\x94\x80 " : "\xe2\x94\x9c\xe2\x94\x80 ";
 
             printf("%*s %-*s %*s %*.0f %*.0f %*.0f %*.0f %*.0f %*.*f %*.*f %*.*f %*.*f %*c ",
                 pidw, pidbuf,
@@ -896,7 +923,11 @@ static void print_threads_for_tgid(const vec_t *raw, pid_t tgid, int pidw, int u
                 mibw, 2, s->w_mib,
                 cpuw, 2, s->cpu_pct,
                 statew, s->state);
-            fprint_trunc(stdout, s->cmd, cmdw);
+            // Print colored connector then truncated command
+            printf(CLR_TREE "%s" CLR_RESET, connector);
+            int remaining_cmd = cmdw - 3; // connector takes 3 display chars
+            if (remaining_cmd > 0)
+                fprint_trunc(stdout, s->cmd, remaining_cmd);
             putchar('\n');
         }
     }
@@ -1122,13 +1153,13 @@ int main(int argc, char **argv) {
                     char f_info[40] = "";
                     if (strlen(filter_str) > 0) snprintf(f_info, sizeof(f_info), "Filter: %s | ", filter_str);
                     
-                    snprintf(right, sizeof(right), "%s[jk/arrows] Scroll | [PgUp/PgDn] Page | [r] Refresh=%.1fs | [c] CPU | [s] Storage | [n] Net | [t] Tree | [l] Limit(%d) | [f] Freeze: %s | [/] Filter | [q] Quit",
+                    snprintf(right, sizeof(right), "%s[r] Refresh=%.1fs | [c] CPU | [s] Storage | [n] Net | [t] Tree | [l] Limit(%d) | [f] Freeze: %s | [/] Filter | [q] Quit",
                              f_info, interval, display_limit, frozen ? "ON" : "OFF");
                 }
                 
                 int pad = cols - (int)strlen(left) - (int)strlen(right);
                 if (pad < 1) pad = 1;
-                printf("%s%*s%s\n", left, pad, "", right);
+                printf(CLR_TITLE "%s%*s%s" CLR_RESET "\n", left, pad, "", right);
 
                 struct sysinfo si;
                 sysinfo(&si);
@@ -1143,7 +1174,7 @@ int main(int argc, char **argv) {
                 fmt_u64_commas(s_tswap, total_swap);
                 fmt_u64_commas(s_uswap, used_swap);
 
-                printf("CPU: %5.2f%% (%d Threads) | RAM: %s / %s MiB (%.1f%%) | SWAP: %s / %s MiB (%.1f%%)\n",
+                printf(CLR_SYSINFO "CPU: %5.2f%% (%d Threads) | RAM: %s / %s MiB (%.1f%%) | SWAP: %s / %s MiB (%.1f%%)" CLR_RESET "\n",
                     global_cpu_percent, system_threads,
                     s_uram, s_tram, (total_ram > 0) ? ((double)used_ram / (double)total_ram * 100.0) : 0.0,
                     s_uswap, s_tswap, (total_swap > 0) ? ((double)used_swap / (double)total_swap * 100.0) : 0.0);
@@ -1159,13 +1190,15 @@ int main(int argc, char **argv) {
                     snprintf(h_rx, 32, "[1] %s", "RX_Mbps");
                     snprintf(h_tx, 32, "[2] %s", "TX_Mbps");
 
-                    printf("%*s %*s %*s %*s %*s %*s %*s %*s %-6s %s\n",
-                        namew, "IFACE", statw, "STATE", 
+                    printf(CLR_COLHDR "%*s %*s %*s %*s %*s %*s %*s %*s %-6s %s" CLR_RESET "\n",
+                        namew, "IFACE", statw, "STATE",
                         ratew, h_rx, ratew, h_tx,
                         pktw, "RX_Pkts", pktw, "TX_Pkts",
                         errw, "RX_Err", errw, "TX_Err",
                         "VMID", "VM_NAME");
-                    for(int i=0; i<cols; i++) putchar('-'); putchar('\n');
+                    printf(CLR_SEPARATOR);
+                    for(int i=0; i<cols; i++) printf("\xe2\x94\x80");
+                    printf(CLR_RESET "\n");
 
                     int count = 0;
                     for(size_t i=0; i<curr_net.len && count < 50; i++) {
@@ -1211,10 +1244,12 @@ int main(int argc, char **argv) {
                     snprintf(h_rl, 32, "[5] R_Lat(ms)");
                     snprintf(h_wl, 32, "[6] W_Lat(ms)");
 
-                    printf("%*s %*s %*s %*s %*s %*s %*s\n",
+                    printf(CLR_COLHDR "%*s %*s %*s %*s %*s %*s %*s" CLR_RESET "\n",
                         devw, "DEVICE", iopsw, h_ri, iopsw, h_wi, mibw, h_rm, mibw, h_wm, latw, h_rl, latw, h_wl);
-                    
-                    for(int i=0; i<cols; i++) putchar('-'); putchar('\n');
+
+                    printf(CLR_SEPARATOR);
+                    for(int i=0; i<cols; i++) printf("\xe2\x94\x80");
+                    printf(CLR_RESET "\n");
 
                     for (size_t i=0; i<curr_disk.len; i++) {
                         const disk_sample_t *d = &curr_disk.data[i];
@@ -1259,7 +1294,7 @@ int main(int argc, char **argv) {
                     int cmdw = cols - fixed_width; 
                     if (cmdw < 10) cmdw = 10;
 
-                    printf("%*s %-*s %*s %*s %*s %*s %*s %*s %*s %*s %*s %*s %*s %s\n",
+                    printf(CLR_COLHDR "%*s %-*s %*s %*s %*s %*s %*s %*s %*s %*s %*s %*s %*s %-*s" CLR_RESET "\n",
                         pidw, "[1] PID",
                         userw, "User",
                         uptimew, "Uptime",
@@ -1273,11 +1308,12 @@ int main(int argc, char **argv) {
                         mibw, "[7] W_MiB",
                         cpuw, "[2] CPU%",
                         statew, "[8] S",
-                        "COMMAND"
+                        cmdw, "COMMAND"
                     );
-                    
-                    for(int i=0; i<cols; i++) putchar('-');
-                    putchar('\n');
+
+                    printf(CLR_SEPARATOR);
+                    for(int i=0; i<cols; i++) printf("\xe2\x94\x80"); // ─
+                    printf(CLR_RESET "\n");
 
                     // Calc totals
                     double t_cpu=0, t_ri=0, t_wi=0, t_rm=0, t_wm=0, t_wt=0;
@@ -1316,10 +1352,10 @@ int main(int argc, char **argv) {
 
                     // Calculate visible rows from terminal size
                     // Header rows: 1 (title bar) + 1 (CPU/RAM) + 1 (scroll info) + 1 (column headers) + 1 (separator) = 5
-                    // Footer rows: 1 (separator) + 1 (totals) = 2
+                    // Footer rows: 1 (separator) + 1 (totals) + 1 (bottom bar) = 3
                     int term_rows = get_term_rows();
                     int header_rows = 5;
-                    int footer_rows = 2;
+                    int footer_rows = 3;
                     int visible_rows = term_rows - header_rows - footer_rows;
                     if (visible_rows < 1) visible_rows = 1;
 
@@ -1333,12 +1369,13 @@ int main(int argc, char **argv) {
                     if (scroll_offset < 0) scroll_offset = 0;
 
                     // Show scroll position indicator
+                    printf(CLR_SCROLLINFO);
                     if (filtered_count > visible_rows) {
                         int end_row = scroll_offset + visible_rows;
                         if (end_row > filtered_count) end_row = filtered_count;
-                        printf("[Row %d-%d of %d]  ", scroll_offset + 1, end_row, filtered_count);
+                        printf("[Row %d\xe2\x94\x80%d of %d]  ", scroll_offset + 1, end_row, filtered_count);
                     }
-                    printf("Processes: %d", filtered_count);
+                    printf("Processes: %d" CLR_RESET, filtered_count);
                     putchar('\n');
 
                     struct sysinfo si;
@@ -1394,9 +1431,10 @@ int main(int argc, char **argv) {
 
                     free(filtered_idx);
 
-                    for(int i=0; i<cols; i++) putchar('-');
-                    putchar('\n');
-                    printf("%*s %*s %*s %*.0f %*.0f %*.0f %*.0f %*.0f %*.*f %*.*f %*.*f %*.*f\n",
+                    printf(CLR_SEPARATOR);
+                    for(int i=0; i<cols; i++) printf("\xe2\x94\x80"); // ─
+                    printf(CLR_RESET "\n");
+                    printf(CLR_TOTALS "%*s %*s %*s %*.0f %*.0f %*.0f %*.0f %*.0f %*.*f %*.*f %*.*f %*.*f" CLR_RESET "\n",
                             pidw, "TOTAL",
                             userw, "",
                             uptimew, "",
@@ -1410,6 +1448,24 @@ int main(int argc, char **argv) {
                             mibw, 0, t_wm,
                             cpuw, 2, t_cpu);
                 }
+
+                // Bottom status bar - position at last terminal row
+                {
+                    int term_rows = get_term_rows();
+                    int term_cols = get_term_cols();
+                    printf("\033[%d;1H", term_rows);
+                    printf(CLR_BOTTOMBAR);
+                    char bar[512];
+                    snprintf(bar, sizeof(bar),
+                        " [j/k] Scroll  [\xe2\x86\x91\xe2\x86\x93] Arrow  [PgUp/PgDn] Page  [g/G] Top/End  [/] Filter  [q] Quit");
+                    int bar_len = (int)strlen(bar);
+                    // Adjust for multi-byte UTF-8 arrows (2 arrows × 3 bytes each = 6 extra bytes vs 2 display chars)
+                    int bar_display_len = bar_len - 4; // ↑↓ are 3 bytes each but 1 char wide
+                    printf("%s", bar);
+                    for (int bi = bar_display_len; bi < term_cols; bi++) putchar(' ');
+                    printf(CLR_RESET);
+                }
+
                 fflush(stdout);
                 dirty = 0;
             }
