@@ -35,7 +35,7 @@
 #define CLR_SEPARATOR   "\033[2;37m"      // Dim white
 #define CLR_TOTALS      "\033[1;33m"      // Bold yellow
 #define CLR_TREE        "\033[36m"        // Cyan
-#define CLR_BOTTOMBAR   "\033[1;37;46m"   // Bold white on cyan
+#define CLR_BOTTOMBAR   "\033[1;37;44m"   // Bold white on blue (matches title bar)
 #define CLR_SCROLLINFO  "\033[1;35m"      // Bold magenta
 
 #ifndef KVM_VERSION
@@ -941,7 +941,7 @@ int main(int argc, char **argv) {
     }
 
     double interval = 5.0;
-    int display_limit = 50;
+    int display_limit = 9999;
     int scroll_offset = 0;
     int cursor_pos = 0;
     int show_tree = 0;
@@ -1482,17 +1482,20 @@ int main(int argc, char **argv) {
                             mibw, 0, t_wm,
                             cpuw, 2, t_cpu);
 
-                    // Show process count / scroll info below totals
-                    printf(CLR_SCROLLINFO);
-                    if (filtered_count > visible_rows) {
-                        int end_row = scroll_offset + visible_rows;
-                        if (end_row > filtered_count) end_row = filtered_count;
-                        printf("Showing %d\xe2\x94\x80%d of %d", scroll_offset + 1, end_row, filtered_count);
-                    } else {
-                        printf("Showing %d", filtered_count);
+                    // Show process count / scroll info below totals, right-aligned
+                    {
+                        char showbuf[128];
+                        if (filtered_count > visible_rows) {
+                            int end_row = scroll_offset + visible_rows;
+                            if (end_row > filtered_count) end_row = filtered_count;
+                            snprintf(showbuf, sizeof(showbuf), "Showing %d-%d of %d%s",
+                                scroll_offset + 1, end_row, filtered_count, show_tree ? " (tree)" : "");
+                        } else {
+                            snprintf(showbuf, sizeof(showbuf), "Showing %d%s",
+                                filtered_count, show_tree ? " (tree)" : "");
+                        }
+                        printf(CLR_SCROLLINFO "%*s" CLR_RESET, cols, showbuf);
                     }
-                    if (show_tree) printf(" (tree)");
-                    printf(CLR_RESET);
                 }
 
                 // Bottom status bar - position at last terminal row
