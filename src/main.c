@@ -1240,14 +1240,17 @@ int main(int argc, char **argv) {
                         default: qsort(curr_net.data, curr_net.len, sizeof(net_iface_t), cmp_net_rx); break;
                     }
 
-                    int namew=16, statw=10, ratew=12, pktw=12, errw=10;
+                    int namew=16, statw=10, ratew=12, pktw=12, errw=10, vmidw=6;
+                    int fixed_net = namew+1+statw+1+ratew+1+ratew+1+pktw+1+pktw+1+errw+1+errw+1+vmidw+1;
+                    int vmnamew = cols - fixed_net;
+                    if (vmnamew < 8) vmnamew = 8;
 
-                    printf(CLR_COLHDR "%*s %*s %*s %*s %*s %*s %*s %*s %-6s %s" CLR_RESET "\n",
+                    printf(CLR_COLHDR "%*s %*s %*s %*s %*s %*s %*s %*s %-*s %-*s" CLR_RESET "\n",
                         namew, "IFACE", statw, "STATE",
                         ratew, "[1] RX_Mbps", ratew, "[2] TX_Mbps",
                         pktw, "[3] RX_Pkts", pktw, "[4] TX_Pkts",
                         errw, "[5] RX_Err", errw, "[6] TX_Err",
-                        "VMID", "VM_NAME");
+                        vmidw, "VMID", vmnamew, "VM_NAME");
                     printf(CLR_SEPARATOR);
                     for(int i=0; i<cols; i++) printf("\xe2\x94\x80");
                     printf(CLR_RESET "\n");
@@ -1296,13 +1299,13 @@ int main(int argc, char **argv) {
                         if (n->vmid > 0) snprintf(vmid_buf, sizeof(vmid_buf), "%d", n->vmid);
 
                         if (is_highlighted) printf(CLR_HIGHLIGHT);
-                        printf("%*s %*s %*.*f %*.*f %*.*f %*.*f %*.*f %*.*f %-6s %s",
+                        printf("%*s %*s %*.*f %*.*f %*.*f %*.*f %*.*f %*.*f %-*s %-*s",
                             namew, n->name, statw, n->operstate,
                             ratew, 2, n->rx_mbps, ratew, 2, n->tx_mbps,
                             pktw, 0, n->rx_pps, pktw, 0, n->tx_pps,
                             errw, 0, n->rx_errs_ps, errw, 0, n->tx_errs_ps,
-                            vmid_buf, n->vm_name);
-                        if (is_highlighted) printf("\033[K" CLR_RESET);
+                            vmidw, vmid_buf, vmnamew, n->vm_name);
+                        if (is_highlighted) printf(CLR_RESET);
                         putchar('\n');
                         lines_printed++;
                     }
@@ -1377,16 +1380,21 @@ int main(int argc, char **argv) {
                         const disk_sample_t *d = &curr_disk.data[disk_filtered[fi]];
                         int is_highlighted = (fi == cursor_pos);
 
+                        int disk_fixed = devw+1+iopsw+1+iopsw+1+mibw+1+mibw+1+latw+1+latw;
+                        int disk_pad = cols - disk_fixed;
+                        if (disk_pad < 0) disk_pad = 0;
+
                         if (is_highlighted) printf(CLR_HIGHLIGHT);
-                        printf("%*s %*.*f %*.*f %*.*f %*.*f %*.*f %*.*f",
+                        printf("%*s %*.*f %*.*f %*.*f %*.*f %*.*f %*.*f%-*s",
                             devw, d->name,
                             iopsw, 2, d->r_iops,
                             iopsw, 2, d->w_iops,
                             mibw, 2, d->r_mib,
                             mibw, 2, d->w_mib,
                             latw, 4, d->r_lat,
-                            latw, 4, d->w_lat);
-                        if (is_highlighted) printf("\033[K" CLR_RESET);
+                            latw, 4, d->w_lat,
+                            disk_pad, "");
+                        if (is_highlighted) printf(CLR_RESET);
                         putchar('\n');
                         lines_printed++;
                     }
@@ -1593,7 +1601,7 @@ int main(int argc, char **argv) {
                             fprint_trunc(stdout, c->cmd, cmdw);
                         }
 
-                        if (is_highlighted) printf("\033[K" CLR_RESET);
+                        if (is_highlighted) printf(CLR_RESET);
                         putchar('\n');
                         lines_printed++;
                     }
