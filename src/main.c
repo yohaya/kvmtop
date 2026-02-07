@@ -30,7 +30,8 @@
 #define CLR_DIM         "\033[2m"
 #define CLR_TITLE       "\033[1;37;44m"   // Bold white on blue
 #define CLR_SYSINFO     "\033[1;36m"      // Bold cyan
-#define CLR_COLHDR      "\033[1;30;42m"   // Bold black on green
+#define CLR_COLHDR      "\033[1;37m"       // Bold white
+#define CLR_HIGHLIGHT   "\033[7m"         // Inverse video (highlighted cursor row)
 #define CLR_SEPARATOR   "\033[2;37m"      // Dim white
 #define CLR_TOTALS      "\033[1;33m"      // Bold yellow
 #define CLR_TREE        "\033[36m"        // Cyan
@@ -942,6 +943,7 @@ int main(int argc, char **argv) {
     double interval = 5.0;
     int display_limit = 50;
     int scroll_offset = 0;
+    int cursor_pos = 0;
     int show_tree = 0;
     int frozen = 0;
     char filter_str[64] = {0};
@@ -983,8 +985,8 @@ int main(int argc, char **argv) {
     }
 
     long hz = sysconf(_SC_CLK_TCK);
-    vec_t prev, curr_raw, curr_proc;
-    vec_init(&prev); vec_init(&curr_raw); vec_init(&curr_proc);
+    vec_t prev, curr_raw, curr_proc, curr_tree;
+    vec_init(&prev); vec_init(&curr_raw); vec_init(&curr_proc); vec_init(&curr_tree);
     
     vec_net_t prev_net, curr_net;
     vec_net_init(&prev_net); vec_net_init(&curr_net);
@@ -1153,7 +1155,7 @@ int main(int argc, char **argv) {
                     char f_info[40] = "";
                     if (strlen(filter_str) > 0) snprintf(f_info, sizeof(f_info), "Filter: %s | ", filter_str);
                     
-                    snprintf(right, sizeof(right), "%s[r] Refresh=%.1fs | [c] CPU | [s] Storage | [n] Net | [t] Tree | [l] Limit(%d) | [f] Freeze: %s | [/] Filter | [q] Quit",
+                    snprintf(right, sizeof(right), "%s[r] Refresh=%.1fs | [c] CPU | [s] Storage | [n] Net | [t] Tree | [l] Limit(%d) | [f] Freeze: %s",
                              f_info, interval, display_limit, frozen ? "ON" : "OFF");
                 }
                 
@@ -1266,32 +1268,48 @@ int main(int argc, char **argv) {
                             latw, 4, d->w_lat);
                     }
                 } else { // MODE_PROCESS
-                    vec_t *view_list = &curr_proc; 
-
+                    // Sort aggregated process list
                     switch(sort_col_proc) {
-                        case SORT_PID: qsort(view_list->data, view_list->len, sizeof(sample_t), cmp_pid); break;
-                        case SORT_CPU: qsort(view_list->data, view_list->len, sizeof(sample_t), cmp_cpu); break;
-                        case SORT_LOG_R: qsort(view_list->data, view_list->len, sizeof(sample_t), cmp_logr); break;
-                        case SORT_LOG_W: qsort(view_list->data, view_list->len, sizeof(sample_t), cmp_logw); break;
-                        case SORT_WAIT: qsort(view_list->data, view_list->len, sizeof(sample_t), cmp_wait); break;
-                        case SORT_RMIB: qsort(view_list->data, view_list->len, sizeof(sample_t), cmp_rmib); break;
-                        case SORT_WMIB: qsort(view_list->data, view_list->len, sizeof(sample_t), cmp_wmib); break;
-                        default: qsort(view_list->data, view_list->len, sizeof(sample_t), cmp_cpu); break;
+                        case SORT_PID: qsort(curr_proc.data, curr_proc.len, sizeof(sample_t), cmp_pid); break;
+                        case SORT_CPU: qsort(curr_proc.data, curr_proc.len, sizeof(sample_t), cmp_cpu); break;
+                        case SORT_LOG_R: qsort(curr_proc.data, curr_proc.len, sizeof(sample_t), cmp_logr); break;
+                        case SORT_LOG_W: qsort(curr_proc.data, curr_proc.len, sizeof(sample_t), cmp_logw); break;
+                        case SORT_WAIT: qsort(curr_proc.data, curr_proc.len, sizeof(sample_t), cmp_wait); break;
+                        case SORT_RMIB: qsort(curr_proc.data, curr_proc.len, sizeof(sample_t), cmp_rmib); break;
+                        case SORT_WMIB: qsort(curr_proc.data, curr_proc.len, sizeof(sample_t), cmp_wmib); break;
+                        default: qsort(curr_proc.data, curr_proc.len, sizeof(sample_t), cmp_cpu); break;
+                    }
+
+                    // Build tree view: parent rows interleaved with child threads
+                    vec_t *view_list;
+                    if (show_tree) {
+                        vec_free(&curr_tree); vec_init(&curr_tree);
+                        for (size_t pi = 0; pi < curr_proc.len; pi++) {
+                            vec_push(&curr_tree, &curr_proc.data[pi]); // parent
+                            pid_t tgid = curr_proc.data[pi].tgid;
+                            for (size_t ti = 0; ti < curr_raw.len; ti++) {
+                                if (curr_raw.data[ti].tgid == tgid && curr_raw.data[ti].pid != tgid)
+                                    vec_push(&curr_tree, &curr_raw.data[ti]); // child thread
+                            }
+                        }
+                        view_list = &curr_tree;
+                    } else {
+                        view_list = &curr_proc;
                     }
 
                     // Column Widths
                     int pidw = 10, cpuw = 8, memw = 10, userw = 10, uptimew=10, statew = 5, iopsw=10, waitw=8, mibw=10;
-                    
+
                     // Headers
-                    int fixed_width = pidw + 1 + cpuw + 1 + 
-                                      memw + 1 + memw + 1 + memw + 1 + 
-                                      uptimew + 1 + userw + 1 + 
-                                      iopsw + 1 + iopsw + 1 + 
-                                      waitw + 1 + 
-                                      mibw + 1 + mibw + 1 + 
+                    int fixed_width = pidw + 1 + cpuw + 1 +
+                                      memw + 1 + memw + 1 + memw + 1 +
+                                      uptimew + 1 + userw + 1 +
+                                      iopsw + 1 + iopsw + 1 +
+                                      waitw + 1 +
+                                      mibw + 1 + mibw + 1 +
                                       statew + 1;
-                                      
-                    int cmdw = cols - fixed_width; 
+
+                    int cmdw = cols - fixed_width;
                     if (cmdw < 10) cmdw = 10;
 
                     printf(CLR_COLHDR "%*s %-*s %*s %*s %*s %*s %*s %*s %*s %*s %*s %*s %*s %-*s" CLR_RESET "\n",
@@ -1351,32 +1369,30 @@ int main(int argc, char **argv) {
                     }
 
                     // Calculate visible rows from terminal size
-                    // Header rows: 1 (title bar) + 1 (CPU/RAM) + 1 (scroll info) + 1 (column headers) + 1 (separator) = 5
-                    // Footer rows: 1 (separator) + 1 (totals) + 1 (bottom bar) = 3
+                    // Header rows: 1 (title bar) + 1 (CPU/RAM) + 1 (column headers) + 1 (separator) = 4
+                    // Footer rows: 1 (separator) + 1 (totals) + 1 (showing) + 1 (bottom bar) = 4
                     int term_rows = get_term_rows();
-                    int header_rows = 5;
-                    int footer_rows = 3;
+                    int header_rows = 4;
+                    int footer_rows = 4;
                     int visible_rows = term_rows - header_rows - footer_rows;
                     if (visible_rows < 1) visible_rows = 1;
 
                     // Apply display_limit if smaller
                     if (display_limit < visible_rows) visible_rows = display_limit;
 
+                    // Clamp cursor_pos
+                    if (cursor_pos < 0) cursor_pos = 0;
+                    if (cursor_pos >= filtered_count) cursor_pos = filtered_count > 0 ? filtered_count - 1 : 0;
+
+                    // Auto-scroll to keep cursor visible
+                    if (cursor_pos < scroll_offset) scroll_offset = cursor_pos;
+                    if (cursor_pos >= scroll_offset + visible_rows) scroll_offset = cursor_pos - visible_rows + 1;
+
                     // Clamp scroll_offset
                     int max_offset = filtered_count - visible_rows;
                     if (max_offset < 0) max_offset = 0;
                     if (scroll_offset > max_offset) scroll_offset = max_offset;
                     if (scroll_offset < 0) scroll_offset = 0;
-
-                    // Show scroll position indicator
-                    printf(CLR_SCROLLINFO);
-                    if (filtered_count > visible_rows) {
-                        int end_row = scroll_offset + visible_rows;
-                        if (end_row > filtered_count) end_row = filtered_count;
-                        printf("[Row %d\xe2\x94\x80%d of %d]  ", scroll_offset + 1, end_row, filtered_count);
-                    }
-                    printf("Processes: %d" CLR_RESET, filtered_count);
-                    putchar('\n');
 
                     struct sysinfo si;
                     sysinfo(&si);
@@ -1385,8 +1401,11 @@ int main(int argc, char **argv) {
                     int lines_printed = 0;
                     for (int fi = scroll_offset; fi < filtered_count && lines_printed < visible_rows; fi++) {
                         const sample_t *c = &view_list->data[filtered_idx[fi]];
+                        int is_thread = (c->pid != c->tgid);
+                        int is_highlighted = (fi == cursor_pos);
+
                         char pidbuf[32];
-                        snprintf(pidbuf, sizeof(pidbuf), "%d", c->tgid);
+                        snprintf(pidbuf, sizeof(pidbuf), "%d", c->pid);
 
                         double res_mib = (double)c->mem_res_pages * 4096.0 / 1048576.0;
                         double shr_mib = (double)c->mem_shr_pages * 4096.0 / 1048576.0;
@@ -1401,32 +1420,47 @@ int main(int argc, char **argv) {
                         if (days > 0) snprintf(uptime_buf, 32, "%dd%02dh", days, hrs);
                         else snprintf(uptime_buf, 32, "%02d:%02d:%02d", hrs, mins, secs);
 
-                        printf("%*s %-*s %*s %*.0f %*.0f %*.0f %*.0f %*.0f %*.*f %*.*f %*.*f %*.*f %*c ",
-                            pidw, pidbuf,
-                            userw, c->user,
-                            uptimew, uptime_buf,
-                            memw, res_mib,
-                            memw, shr_mib,
-                            memw, virt_mib,
-                            iopsw, c->r_iops,
-                            iopsw, c->w_iops,
-                            waitw, 2, c->io_wait_ms,
-                            mibw, 2, c->r_mib,
-                            mibw, 2, c->w_mib,
-                            cpuw, 2, c->cpu_pct,
-                            statew, c->state);
-                        fprint_trunc(stdout, c->cmd, cmdw);
+                        if (is_highlighted) printf(CLR_HIGHLIGHT);
+
+                        if (is_thread) {
+                            // Thread row: blank user/uptime, zero memory
+                            printf("%*s %-*s %*s %*.0f %*.0f %*.0f %*.0f %*.0f %*.*f %*.*f %*.*f %*.*f %*c ",
+                                pidw, pidbuf, userw, "", uptimew, "",
+                                memw, 0.0, memw, 0.0, memw, 0.0,
+                                iopsw, c->r_iops, iopsw, c->w_iops,
+                                waitw, 2, c->io_wait_ms,
+                                mibw, 2, c->r_mib, mibw, 2, c->w_mib,
+                                cpuw, 2, c->cpu_pct, statew, c->state);
+                            // Tree connector: check if last child
+                            int is_last = 1;
+                            if (fi + 1 < filtered_count) {
+                                const sample_t *next = &view_list->data[filtered_idx[fi + 1]];
+                                if (next->tgid == c->tgid && next->pid != next->tgid)
+                                    is_last = 0;
+                            }
+                            const char *conn = is_last ? "\xe2\x94\x94\xe2\x94\x80 " : "\xe2\x94\x9c\xe2\x94\x80 ";
+                            if (!is_highlighted) printf(CLR_TREE);
+                            printf("%s", conn);
+                            if (!is_highlighted) printf(CLR_RESET);
+                            if (is_highlighted) {
+                                fprint_trunc(stdout, c->cmd, cmdw - 3);
+                            } else {
+                                fprint_trunc(stdout, c->cmd, cmdw - 3);
+                            }
+                        } else {
+                            printf("%*s %-*s %*s %*.0f %*.0f %*.0f %*.0f %*.0f %*.*f %*.*f %*.*f %*.*f %*c ",
+                                pidw, pidbuf, userw, c->user, uptimew, uptime_buf,
+                                memw, res_mib, memw, shr_mib, memw, virt_mib,
+                                iopsw, c->r_iops, iopsw, c->w_iops,
+                                waitw, 2, c->io_wait_ms,
+                                mibw, 2, c->r_mib, mibw, 2, c->w_mib,
+                                cpuw, 2, c->cpu_pct, statew, c->state);
+                            fprint_trunc(stdout, c->cmd, cmdw);
+                        }
+
+                        if (is_highlighted) printf(CLR_RESET);
                         putchar('\n');
                         lines_printed++;
-
-                        if (show_tree) {
-                            print_threads_for_tgid(&curr_raw, c->tgid, pidw, userw, uptimew, memw, iopsw, waitw, mibw, cpuw, statew, cmdw);
-                            // Count thread lines against visible rows
-                            for (size_t ti = 0; ti < curr_raw.len && lines_printed < visible_rows; ti++) {
-                                if (curr_raw.data[ti].tgid == c->tgid && curr_raw.data[ti].pid != c->tgid)
-                                    lines_printed++;
-                            }
-                        }
                     }
 
                     free(filtered_idx);
@@ -1447,6 +1481,18 @@ int main(int argc, char **argv) {
                             mibw, 0, t_rm,
                             mibw, 0, t_wm,
                             cpuw, 2, t_cpu);
+
+                    // Show process count / scroll info below totals
+                    printf(CLR_SCROLLINFO);
+                    if (filtered_count > visible_rows) {
+                        int end_row = scroll_offset + visible_rows;
+                        if (end_row > filtered_count) end_row = filtered_count;
+                        printf("Showing %d\xe2\x94\x80%d of %d", scroll_offset + 1, end_row, filtered_count);
+                    } else {
+                        printf("Showing %d", filtered_count);
+                    }
+                    if (show_tree) printf(" (tree)");
+                    printf(CLR_RESET);
                 }
 
                 // Bottom status bar - position at last terminal row
@@ -1562,13 +1608,13 @@ int main(int argc, char **argv) {
                     if (c == 'c' || c == 'C') { mode = MODE_PROCESS; dirty = 1; }
                     if (c == 's' || c == 'S') { mode = MODE_STORAGE; dirty = 1; }
 
-                    // Scroll keys
-                    if (c == KEY_UP || c == 'k') { scroll_offset--; if (scroll_offset < 0) scroll_offset = 0; dirty = 1; }
-                    if (c == KEY_DOWN || c == 'j') { scroll_offset++; dirty = 1; }
-                    if (c == KEY_PGUP) { int vr = get_term_rows() - 7; if (vr < 1) vr = 1; scroll_offset -= vr; if (scroll_offset < 0) scroll_offset = 0; dirty = 1; }
-                    if (c == KEY_PGDN) { int vr = get_term_rows() - 7; if (vr < 1) vr = 1; scroll_offset += vr; dirty = 1; }
-                    if (c == KEY_HOME || c == 'g') { scroll_offset = 0; dirty = 1; }
-                    if (c == KEY_END || c == 'G') { scroll_offset = INT_MAX / 2; dirty = 1; } // Will be clamped during render
+                    // Cursor/scroll keys — move the highlighted cursor line
+                    if (c == KEY_UP || c == 'k') { cursor_pos--; dirty = 1; }
+                    if (c == KEY_DOWN || c == 'j') { cursor_pos++; dirty = 1; }
+                    if (c == KEY_PGUP) { int vr = get_term_rows() - 8; if (vr < 1) vr = 1; cursor_pos -= vr; dirty = 1; }
+                    if (c == KEY_PGDN) { int vr = get_term_rows() - 8; if (vr < 1) vr = 1; cursor_pos += vr; dirty = 1; }
+                    if (c == KEY_HOME || c == 'g') { cursor_pos = 0; dirty = 1; }
+                    if (c == KEY_END || c == 'G') { cursor_pos = INT_MAX / 2; dirty = 1; } // Will be clamped during render
 
                     if (mode == MODE_PROCESS) {
                         if (c == '1' || c == 0x01) { if (sort_col_proc == SORT_PID) sort_desc = !sort_desc; else { sort_col_proc = SORT_PID; sort_desc = 1; } dirty = 1; }
@@ -1610,6 +1656,7 @@ cleanup:
     vec_free(&prev);
     vec_free(&curr_raw);
     vec_free(&curr_proc);
+    vec_free(&curr_tree);
     vec_net_free(&prev_net);
     vec_net_free(&curr_net);
     vec_disk_free(&prev_disk);
