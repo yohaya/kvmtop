@@ -24,6 +24,20 @@
 #define CMD_MAX 512
 #endif
 
+// ANSI color codes
+#define CLR_RESET       "\033[0m"
+#define CLR_BOLD        "\033[1m"
+#define CLR_DIM         "\033[2m"
+#define CLR_TITLE       "\033[1;37;44m"   // Bold white on blue
+#define CLR_SYSINFO     "\033[1;36m"      // Bold cyan
+#define CLR_COLHDR      "\033[1;37m"       // Bold white
+#define CLR_HIGHLIGHT   "\033[7m"         // Inverse video (highlighted cursor row)
+#define CLR_SEPARATOR   "\033[2;37m"      // Dim white
+#define CLR_TOTALS      "\033[1;33m"      // Bold yellow
+#define CLR_TREE        "\033[36m"        // Cyan
+#define CLR_BOTTOMBAR   "\033[1;37;44m"   // Bold white on blue (matches title bar)
+#define CLR_SCROLLINFO  "\033[1;35m"      // Bold magenta
+
 #ifndef KVM_VERSION
 #define KVM_VERSION "v1.0.1-dev"
 #endif
@@ -64,6 +78,7 @@ typedef struct {
     double w_mib;
 
     char cmd[CMD_MAX];
+    char comm[CMD_MAX]; // thread's own comm name (from /proc/task/TID/comm)
 } sample_t;
 
 typedef struct {
@@ -228,6 +243,14 @@ static void enable_raw_mode() {
     printf("\033[?25l"); 
 }
 
+// Special key constants (above ASCII range)
+#define KEY_UP      256
+#define KEY_DOWN    257
+#define KEY_PGUP    258
+#define KEY_PGDN    259
+#define KEY_HOME    260
+#define KEY_END     261
+
 static int wait_for_input(double seconds) {
     if (seconds < 0) seconds = 0;
     struct timeval tv;
@@ -240,10 +263,46 @@ static int wait_for_input(double seconds) {
     FD_SET(STDIN_FILENO, &fds);
 
     int ret = select(STDIN_FILENO + 1, &fds, NULL, NULL, &tv);
-    
+
     if (ret > 0) {
         unsigned char c;
-        if (read(STDIN_FILENO, &c, 1) == 1) return c;
+        if (read(STDIN_FILENO, &c, 1) == 1) {
+            if (c == 27) { // ESC - check for escape sequence
+                // Brief wait to see if more bytes follow
+                struct timeval short_tv = {0, 50000}; // 50ms
+                fd_set fds2;
+                FD_ZERO(&fds2);
+                FD_SET(STDIN_FILENO, &fds2);
+                if (select(STDIN_FILENO + 1, &fds2, NULL, NULL, &short_tv) > 0) {
+                    unsigned char seq1;
+                    if (read(STDIN_FILENO, &seq1, 1) == 1 && seq1 == '[') {
+                        unsigned char seq2;
+                        if (read(STDIN_FILENO, &seq2, 1) == 1) {
+                            switch (seq2) {
+                                case 'A': return KEY_UP;
+                                case 'B': return KEY_DOWN;
+                                case 'H': return KEY_HOME;
+                                case 'F': return KEY_END;
+                                case '5': // Page Up: ESC [ 5 ~
+                                    read(STDIN_FILENO, &seq2, 1); // consume '~'
+                                    return KEY_PGUP;
+                                case '6': // Page Down: ESC [ 6 ~
+                                    read(STDIN_FILENO, &seq2, 1); // consume '~'
+                                    return KEY_PGDN;
+                                case '1': // Home: ESC [ 1 ~
+                                    read(STDIN_FILENO, &seq2, 1); // consume '~'
+                                    return KEY_HOME;
+                                case '4': // End: ESC [ 4 ~
+                                    read(STDIN_FILENO, &seq2, 1); // consume '~'
+                                    return KEY_END;
+                            }
+                        }
+                    }
+                }
+                return 27; // Plain ESC
+            }
+            return c;
+        }
     }
     return 0; // Timeout or error
 }
@@ -255,6 +314,15 @@ static int get_term_cols(void) {
         if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0) if (ws.ws_col > 0) cols = ws.ws_col;
     }
     return cols;
+}
+
+static int get_term_rows(void) {
+    int rows = 40;
+    if (isatty(STDOUT_FILENO)) {
+        struct winsize ws;
+        if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0) if (ws.ws_row > 0) rows = ws.ws_row;
+    }
+    return rows;
 }
 
 static void fprint_trunc(FILE *out, const char *s, int width) {
@@ -301,17 +369,22 @@ static void sanitize_cmd(char out[CMD_MAX], const char *in, size_t in_len) {
 static int read_cmdline(pid_t pid, char out[CMD_MAX]) {
     char path[PATH_MAX], buf[8192];
     ssize_t n = 0;
-    
+
     snprintf(path, sizeof(path), "/proc/%d/cmdline", pid);
     if (read_small_file(path, buf, sizeof(buf), &n) == 0 && n > 0) {
         sanitize_cmd(out, buf, (size_t)n);
         if (out[0] != '\0' && out[0] != ' ') return 0;
     }
 
+    // cmdline was empty — this is a kernel thread; wrap name in [] like ps does
     snprintf(path, sizeof(path), "/proc/%d/comm", pid);
     if (read_small_file(path, buf, sizeof(buf), &n) == 0 && n > 0) {
-        sanitize_cmd(out, buf, (size_t)n); 
-        if (out[0] != '\0' && out[0] != ' ') return 0;
+        char tmp[CMD_MAX];
+        sanitize_cmd(tmp, buf, (size_t)n);
+        if (tmp[0] != '\0' && tmp[0] != ' ') {
+            snprintf(out, CMD_MAX, "[%s]", tmp);
+            return 0;
+        }
     }
 
     snprintf(path, sizeof(path), "/proc/%d/stat", pid);
@@ -320,9 +393,11 @@ static int read_cmdline(pid_t pid, char out[CMD_MAX]) {
         char *end = strrchr(buf, ')');
         if (start && end && end > start) {
             size_t len = (size_t)(end - start - 1);
-            if (len >= CMD_MAX) len = CMD_MAX - 1;
-            strncpy(out, start + 1, len);
-            out[len] = '\0';
+            if (len >= CMD_MAX - 3) len = CMD_MAX - 3;
+            out[0] = '[';
+            strncpy(out + 1, start + 1, len);
+            out[len + 1] = ']';
+            out[len + 2] = '\0';
             return 0;
         }
     }
@@ -632,7 +707,19 @@ static int collect_samples(vec_t *out, const pid_t *filter_pids, size_t filter_n
                 s.pid = tid; 
                 s.tgid = pid;
                 s.key = make_key(tid);
-                snprintf(s.cmd, sizeof(s.cmd), "%s", cmd); 
+                snprintf(s.cmd, sizeof(s.cmd), "%s", cmd);
+
+                // Read thread's own comm name
+                {
+                    char comm_path[PATH_MAX], comm_buf[256];
+                    ssize_t comm_n;
+                    snprintf(comm_path, sizeof(comm_path), "/proc/%d/task/%d/comm", pid, tid);
+                    if (read_small_file(comm_path, comm_buf, sizeof(comm_buf), &comm_n) == 0 && comm_n > 0) {
+                        sanitize_cmd(s.comm, comm_buf, (size_t)comm_n);
+                    } else {
+                        snprintf(s.comm, sizeof(s.comm), "%d", tid);
+                    }
+                }
 
                 char io_path[PATH_MAX], stat_path[PATH_MAX];
                 snprintf(io_path, sizeof(io_path), "/proc/%d/task/%d/io", pid, tid);
@@ -649,10 +736,11 @@ static int collect_samples(vec_t *out, const pid_t *filter_pids, size_t filter_n
         } else {
             // Fallback
             sample_t s; memset(&s, 0, sizeof(s));
-            s.pid = pid; 
+            s.pid = pid;
             s.tgid = pid;
             s.key = make_key(pid);
             snprintf(s.cmd, sizeof(s.cmd), "%s", cmd);
+            snprintf(s.comm, sizeof(s.comm), "%s", cmd);
 
             char io_path[PATH_MAX], stat_path[PATH_MAX];
             snprintf(io_path, sizeof(io_path), "/proc/%d/io", pid);
@@ -693,8 +781,8 @@ static int sort_desc = 1;
 
 // Sort Comparators
 typedef enum { 
-    SORT_PID=1, SORT_CPU, SORT_LOG_R, SORT_LOG_W, SORT_WAIT, SORT_RMIB, SORT_WMIB,
-    SORT_NET_RX, SORT_NET_TX,
+    SORT_PID=1, SORT_CPU, SORT_LOG_R, SORT_LOG_W, SORT_WAIT, SORT_RMIB, SORT_WMIB, SORT_STATE,
+    SORT_NET_RX, SORT_NET_TX, SORT_NET_RX_PKT, SORT_NET_TX_PKT, SORT_NET_RX_ERR, SORT_NET_TX_ERR,
     SORT_MEM_RES, SORT_MEM_SHR, SORT_MEM_VIRT, SORT_USER, SORT_UPTIME,
     // Disk specific
     SORT_DISK_RIO, SORT_DISK_WIO, SORT_DISK_RMIB, SORT_DISK_WMIB, SORT_DISK_RLAT, SORT_DISK_WLAT
@@ -738,6 +826,11 @@ static int cmp_wmib(const void *a, const void *b) {
     const sample_t *y = (const sample_t *)b;
     return CMP_NUM(x->w_mib, y->w_mib);
 }
+static int cmp_state(const void *a, const void *b) {
+    const sample_t *x = (const sample_t *)a;
+    const sample_t *y = (const sample_t *)b;
+    return CMP_NUM(x->state, y->state);
+}
 static int cmp_net_rx(const void *a, const void *b) {
     const net_iface_t *x = (const net_iface_t *)a;
     const net_iface_t *y = (const net_iface_t *)b;
@@ -747,6 +840,26 @@ static int cmp_net_tx(const void *a, const void *b) {
     const net_iface_t *x = (const net_iface_t *)a;
     const net_iface_t *y = (const net_iface_t *)b;
     return CMP_NUM(x->tx_mbps, y->tx_mbps);
+}
+static int cmp_net_rx_pkt(const void *a, const void *b) {
+    const net_iface_t *x = (const net_iface_t *)a;
+    const net_iface_t *y = (const net_iface_t *)b;
+    return CMP_NUM(x->rx_pps, y->rx_pps);
+}
+static int cmp_net_tx_pkt(const void *a, const void *b) {
+    const net_iface_t *x = (const net_iface_t *)a;
+    const net_iface_t *y = (const net_iface_t *)b;
+    return CMP_NUM(x->tx_pps, y->tx_pps);
+}
+static int cmp_net_rx_err(const void *a, const void *b) {
+    const net_iface_t *x = (const net_iface_t *)a;
+    const net_iface_t *y = (const net_iface_t *)b;
+    return CMP_NUM(x->rx_errs_ps, y->rx_errs_ps);
+}
+static int cmp_net_tx_err(const void *a, const void *b) {
+    const net_iface_t *x = (const net_iface_t *)a;
+    const net_iface_t *y = (const net_iface_t *)b;
+    return CMP_NUM(x->tx_errs_ps, y->tx_errs_ps);
 }
 static int cmp_disk_rio(const void *a, const void *b) {
     const disk_sample_t *x = (const disk_sample_t *)a;
@@ -821,24 +934,47 @@ static void aggregate_by_tgid(const vec_t *src, vec_t *dst) {
     }
 }
 
-// Tree view helper
-static void print_threads_for_tgid(const vec_t *raw, pid_t tgid, int pidw, int cpuw, int iopsw, int waitw, int mibw, int statew, int cmdw) {
+// Tree view helper - htop-style tree connectors in COMMAND column
+static void print_threads_for_tgid(const vec_t *raw, pid_t tgid, int pidw, int userw, int uptimew, int memw, int iopsw, int waitw, int mibw, int cpuw, int statew, int cmdw) {
+    // First, count children to know which is last
+    size_t child_count = 0;
+    for (size_t i = 0; i < raw->len; i++) {
+        if (raw->data[i].tgid == tgid && raw->data[i].pid != tgid)
+            child_count++;
+    }
+
+    size_t child_idx = 0;
     for (size_t i = 0; i < raw->len; i++) {
         const sample_t *s = &raw->data[i];
-        if (s->tgid == tgid && s->pid != tgid) { 
+        if (s->tgid == tgid && s->pid != tgid) {
+            child_idx++;
+            int is_last = (child_idx == child_count);
+
             char pidbuf[32];
-            snprintf(pidbuf, sizeof(pidbuf), "  └─ %d", s->pid); // Indent
-            
-            printf("%*s %*.*f %*.0f %*.0f %*.*f %*.*f %*.*f %*c ",
+            snprintf(pidbuf, sizeof(pidbuf), "%d", s->pid);
+
+            // Tree connector: ├─ or └─ (each 2 display chars + space = 3 display chars)
+            const char *connector = is_last ? "\xe2\x94\x94\xe2\x94\x80 " : "\xe2\x94\x9c\xe2\x94\x80 ";
+
+            printf("%*s %-*s %*s %*.0f %*.0f %*.0f %*.0f %*.0f %*.*f %*.*f %*.*f %*.*f %*c ",
                 pidw, pidbuf,
-                cpuw, 2, s->cpu_pct,
+                userw, "",
+                uptimew, "",
+                memw, 0.0,
+                memw, 0.0,
+                memw, 0.0,
                 iopsw, s->r_iops,
                 iopsw, s->w_iops,
                 waitw, 2, s->io_wait_ms,
                 mibw, 2, s->r_mib,
                 mibw, 2, s->w_mib,
+                cpuw, 2, s->cpu_pct,
                 statew, s->state);
-            fprint_trunc(stdout, s->cmd, cmdw);
+            // Print colored connector then truncated command
+            printf(CLR_TREE "%s" CLR_RESET, connector);
+            int remaining_cmd = cmdw - 3; // connector takes 3 display chars
+            if (remaining_cmd > 0)
+                fprint_trunc(stdout, s->cmd, remaining_cmd);
             putchar('\n');
         }
     }
@@ -850,9 +986,13 @@ int main(int argc, char **argv) {
         sleep(2);
     }
 
-    double interval = 5.0; 
-    int display_limit = 50;
+    double interval = 2.0;
+    int display_limit = 9999;
+    int scroll_offset = 0;
+    int cursor_pos = 0;
     int show_tree = 0;
+    int show_thread_alias = 0;
+    int hide_system = 0;
     int frozen = 0;
     char filter_str[64] = {0};
     int in_filter_mode = 0;
@@ -893,8 +1033,8 @@ int main(int argc, char **argv) {
     }
 
     long hz = sysconf(_SC_CLK_TCK);
-    vec_t prev, curr_raw, curr_proc;
-    vec_init(&prev); vec_init(&curr_raw); vec_init(&curr_proc);
+    vec_t prev, curr_raw, curr_proc, curr_tree;
+    vec_init(&prev); vec_init(&curr_raw); vec_init(&curr_proc); vec_init(&curr_tree);
     
     vec_net_t prev_net, curr_net;
     vec_net_init(&prev_net); vec_net_init(&curr_net);
@@ -1049,7 +1189,7 @@ int main(int argc, char **argv) {
                 printf("\033[2J\033[H"); 
                 int cols = get_term_cols();
                 
-                char left[128], right[128];
+                char left[128], right[256];
                 snprintf(left, sizeof(left), "kvmtop %s", KVM_VERSION);
                 
                 if (in_filter_mode) {
@@ -1063,13 +1203,13 @@ int main(int argc, char **argv) {
                     char f_info[40] = "";
                     if (strlen(filter_str) > 0) snprintf(f_info, sizeof(f_info), "Filter: %s | ", filter_str);
                     
-                    snprintf(right, sizeof(right), "%s[r] Refresh=%.1fs | [c] CPU | [s] Storage | [n] Net | [t] Tree | [l] Limit(%d) | [f] Freeze: %s | [/] Filter | [q] Quit", 
-                             f_info, interval, display_limit, frozen ? "ON" : "OFF");
+                    snprintf(right, sizeof(right), "%s[r] Refresh=%.1fs | [c] CPU | [s] Storage | [n] Net | [t] Threads | [a] Alias: %s | [h] Hide Sys: %s | [l] Limit(%d) | [f] Freeze: %s",
+                             f_info, interval, show_thread_alias ? "ON" : "OFF", hide_system ? "ON" : "OFF", display_limit, frozen ? "ON" : "OFF");
                 }
                 
                 int pad = cols - (int)strlen(left) - (int)strlen(right);
                 if (pad < 1) pad = 1;
-                printf("%s%*s%s\n", left, pad, "", right);
+                printf(CLR_TITLE "%s%*s%s" CLR_RESET "\n", left, pad, "", right);
 
                 struct sysinfo si;
                 sysinfo(&si);
@@ -1084,53 +1224,102 @@ int main(int argc, char **argv) {
                 fmt_u64_commas(s_tswap, total_swap);
                 fmt_u64_commas(s_uswap, used_swap);
 
-                printf("CPU: %5.2f%% (%d Threads) | RAM: %s / %s MiB (%.1f%%) | SWAP: %s / %s MiB (%.1f%%)\n",
+                printf(CLR_SYSINFO "CPU: %5.2f%% (%d Threads) | RAM: %s / %s MiB (%.1f%%) | SWAP: %s / %s MiB (%.1f%%)" CLR_RESET "\n",
                     global_cpu_percent, system_threads,
                     s_uram, s_tram, (total_ram > 0) ? ((double)used_ram / (double)total_ram * 100.0) : 0.0,
                     s_uswap, s_tswap, (total_swap > 0) ? ((double)used_swap / (double)total_swap * 100.0) : 0.0);
 
                 if (mode == MODE_NETWORK) {
-                    if (sort_col_net == SORT_NET_RX) 
-                        qsort(curr_net.data, curr_net.len, sizeof(net_iface_t), cmp_net_rx);
-                    else
-                        qsort(curr_net.data, curr_net.len, sizeof(net_iface_t), cmp_net_tx);
+                    switch(sort_col_net) {
+                        case SORT_NET_RX: qsort(curr_net.data, curr_net.len, sizeof(net_iface_t), cmp_net_rx); break;
+                        case SORT_NET_TX: qsort(curr_net.data, curr_net.len, sizeof(net_iface_t), cmp_net_tx); break;
+                        case SORT_NET_RX_PKT: qsort(curr_net.data, curr_net.len, sizeof(net_iface_t), cmp_net_rx_pkt); break;
+                        case SORT_NET_TX_PKT: qsort(curr_net.data, curr_net.len, sizeof(net_iface_t), cmp_net_tx_pkt); break;
+                        case SORT_NET_RX_ERR: qsort(curr_net.data, curr_net.len, sizeof(net_iface_t), cmp_net_rx_err); break;
+                        case SORT_NET_TX_ERR: qsort(curr_net.data, curr_net.len, sizeof(net_iface_t), cmp_net_tx_err); break;
+                        default: qsort(curr_net.data, curr_net.len, sizeof(net_iface_t), cmp_net_rx); break;
+                    }
 
-                    int namew=16, statw=10, ratew=12, pktw=10, errw=8;
-                    char h_rx[32], h_tx[32];
-                    snprintf(h_rx, 32, "[1] %s", "RX_Mbps");
-                    snprintf(h_tx, 32, "[2] %s", "TX_Mbps");
+                    int namew=16, statw=10, ratew=12, pktw=12, errw=10, vmidw=6;
+                    int fixed_net = namew+1+statw+1+ratew+1+ratew+1+pktw+1+pktw+1+errw+1+errw+1+vmidw+1;
+                    int vmnamew = cols - fixed_net;
+                    if (vmnamew < 8) vmnamew = 8;
 
-                    printf("%*s %*s %*s %*s %*s %*s %*s %*s %-6s %s\n",
-                        namew, "IFACE", statw, "STATE", 
-                        ratew, h_rx, ratew, h_tx,
-                        pktw, "RX_Pkts", pktw, "TX_Pkts",
-                        errw, "RX_Err", errw, "TX_Err",
-                        "VMID", "VM_NAME");
-                    for(int i=0; i<cols; i++) putchar('-'); putchar('\n');
+                    printf(CLR_COLHDR "%*s %*s %*s %*s %*s %*s %*s %*s %-*s %-*s" CLR_RESET "\n",
+                        namew, "IFACE", statw, "STATE",
+                        ratew, "[1] RX_Mbps", ratew, "[2] TX_Mbps",
+                        pktw, "[3] RX_Pkts", pktw, "[4] TX_Pkts",
+                        errw, "[5] RX_Err", errw, "[6] TX_Err",
+                        vmidw, "VMID", vmnamew, "VM_NAME");
+                    printf(CLR_SEPARATOR);
+                    for(int i=0; i<cols; i++) printf("\xe2\x94\x80");
+                    printf(CLR_RESET "\n");
 
-                    int count = 0;
-                    for(size_t i=0; i<curr_net.len && count < 50; i++) {
-                        net_iface_t *n = &curr_net.data[i];
-                        if (strncmp(n->name, "fw", 2) == 0 || strcmp(n->name, "lo")==0) continue;
+                    // Build filtered index list
+                    int *net_filtered = NULL;
+                    int net_fcount = 0;
+                    {
+                        int ncap = (int)curr_net.len;
+                        if (ncap < 16) ncap = 16;
+                        net_filtered = (int *)malloc(ncap * sizeof(int));
+                        for (size_t i = 0; i < curr_net.len; i++) {
+                            net_iface_t *n = &curr_net.data[i];
+                            if (strncmp(n->name, "fw", 2) == 0 || strcmp(n->name, "lo") == 0) continue;
+                            if (strlen(filter_str) > 0) {
+                                char vmid_buf[16] = "-";
+                                if (n->vmid > 0) snprintf(vmid_buf, sizeof(vmid_buf), "%d", n->vmid);
+                                if (!strcasestr(n->name, filter_str) &&
+                                    !strcasestr(n->operstate, filter_str) &&
+                                    !strcasestr(vmid_buf, filter_str) &&
+                                    !strcasestr(n->vm_name, filter_str)) continue;
+                            }
+                            net_filtered[net_fcount++] = (int)i;
+                        }
+                    }
+
+                    int term_rows = get_term_rows();
+                    int visible_rows = term_rows - 4 - 2; // header(4) + showing+bottombar(2)
+                    if (visible_rows < 1) visible_rows = 1;
+
+                    if (cursor_pos < 0) cursor_pos = 0;
+                    if (cursor_pos >= net_fcount) cursor_pos = net_fcount > 0 ? net_fcount - 1 : 0;
+                    if (cursor_pos < scroll_offset) scroll_offset = cursor_pos;
+                    if (cursor_pos >= scroll_offset + visible_rows) scroll_offset = cursor_pos - visible_rows + 1;
+                    int max_off = net_fcount - visible_rows;
+                    if (max_off < 0) max_off = 0;
+                    if (scroll_offset > max_off) scroll_offset = max_off;
+                    if (scroll_offset < 0) scroll_offset = 0;
+
+                    int lines_printed = 0;
+                    for (int fi = scroll_offset; fi < net_fcount && lines_printed < visible_rows; fi++) {
+                        net_iface_t *n = &curr_net.data[net_filtered[fi]];
+                        int is_highlighted = (fi == cursor_pos);
 
                         char vmid_buf[16] = "-";
                         if (n->vmid > 0) snprintf(vmid_buf, sizeof(vmid_buf), "%d", n->vmid);
 
-                        // FILTER CHECK
-                        if (strlen(filter_str) > 0) {
-                            if (!strcasestr(n->name, filter_str) && 
-                                !strcasestr(n->operstate, filter_str) &&
-                                !strcasestr(vmid_buf, filter_str) &&
-                                !strcasestr(n->vm_name, filter_str)) continue;
-                        }
-
-                        printf("%*s %*s %*.*f %*.*f %*.*f %*.*f %*.*f %*.*f %-6s %s\n",
+                        if (is_highlighted) printf(CLR_HIGHLIGHT);
+                        printf("%*s %*s %*.*f %*.*f %*.*f %*.*f %*.*f %*.*f %-*s %-*s",
                             namew, n->name, statw, n->operstate,
                             ratew, 2, n->rx_mbps, ratew, 2, n->tx_mbps,
                             pktw, 0, n->rx_pps, pktw, 0, n->tx_pps,
                             errw, 0, n->rx_errs_ps, errw, 0, n->tx_errs_ps,
-                            vmid_buf, n->vm_name);
-                        count++;
+                            vmidw, vmid_buf, vmnamew, n->vm_name);
+                        if (is_highlighted) printf(CLR_RESET);
+                        putchar('\n');
+                        lines_printed++;
+                    }
+                    free(net_filtered);
+
+                    // Showing info - pinned to row above bottom bar
+                    {
+                        int end_row = scroll_offset + visible_rows;
+                        if (end_row > net_fcount) end_row = net_fcount;
+                        char showbuf[128];
+                        snprintf(showbuf, sizeof(showbuf), "Showing %d-%d of %d",
+                            scroll_offset + 1, end_row > 0 ? end_row : 0, net_fcount);
+                        printf("\033[%d;1H\033[2K", term_rows - 1);
+                        printf(CLR_SCROLLINFO "%*s" CLR_RESET, cols, showbuf);
                     }
                 } else if (mode == MODE_STORAGE) {
                     switch(sort_col_disk) {
@@ -1152,55 +1341,122 @@ int main(int argc, char **argv) {
                     snprintf(h_rl, 32, "[5] R_Lat(ms)");
                     snprintf(h_wl, 32, "[6] W_Lat(ms)");
 
-                    printf("%*s %*s %*s %*s %*s %*s %*s\n",
+                    printf(CLR_COLHDR "%*s %*s %*s %*s %*s %*s %*s" CLR_RESET "\n",
                         devw, "DEVICE", iopsw, h_ri, iopsw, h_wi, mibw, h_rm, mibw, h_wm, latw, h_rl, latw, h_wl);
-                    
-                    for(int i=0; i<cols; i++) putchar('-'); putchar('\n');
 
-                    for (size_t i=0; i<curr_disk.len; i++) {
-                        const disk_sample_t *d = &curr_disk.data[i];
-                        // Filter
-                        if (strlen(filter_str) > 0 && !strcasestr(d->name, filter_str)) continue;
+                    printf(CLR_SEPARATOR);
+                    for(int i=0; i<cols; i++) printf("\xe2\x94\x80");
+                    printf(CLR_RESET "\n");
 
-                        printf("%*s %*.*f %*.*f %*.*f %*.*f %*.*f %*.*f\n",
+                    // Build filtered index list
+                    int *disk_filtered = NULL;
+                    int disk_fcount = 0;
+                    {
+                        int dcap = (int)curr_disk.len;
+                        if (dcap < 16) dcap = 16;
+                        disk_filtered = (int *)malloc(dcap * sizeof(int));
+                        for (size_t i = 0; i < curr_disk.len; i++) {
+                            const disk_sample_t *d = &curr_disk.data[i];
+                            if (strlen(filter_str) > 0 && !strcasestr(d->name, filter_str)) continue;
+                            disk_filtered[disk_fcount++] = (int)i;
+                        }
+                    }
+
+                    int term_rows = get_term_rows();
+                    int visible_rows = term_rows - 4 - 2; // header(4) + showing+bottombar(2)
+                    if (visible_rows < 1) visible_rows = 1;
+
+                    if (cursor_pos < 0) cursor_pos = 0;
+                    if (cursor_pos >= disk_fcount) cursor_pos = disk_fcount > 0 ? disk_fcount - 1 : 0;
+                    if (cursor_pos < scroll_offset) scroll_offset = cursor_pos;
+                    if (cursor_pos >= scroll_offset + visible_rows) scroll_offset = cursor_pos - visible_rows + 1;
+                    int max_off = disk_fcount - visible_rows;
+                    if (max_off < 0) max_off = 0;
+                    if (scroll_offset > max_off) scroll_offset = max_off;
+                    if (scroll_offset < 0) scroll_offset = 0;
+
+                    int lines_printed = 0;
+                    for (int fi = scroll_offset; fi < disk_fcount && lines_printed < visible_rows; fi++) {
+                        const disk_sample_t *d = &curr_disk.data[disk_filtered[fi]];
+                        int is_highlighted = (fi == cursor_pos);
+
+                        int disk_fixed = devw+1+iopsw+1+iopsw+1+mibw+1+mibw+1+latw+1+latw;
+                        int disk_pad = cols - disk_fixed;
+                        if (disk_pad < 0) disk_pad = 0;
+
+                        if (is_highlighted) printf(CLR_HIGHLIGHT);
+                        printf("%*s %*.*f %*.*f %*.*f %*.*f %*.*f %*.*f%-*s",
                             devw, d->name,
                             iopsw, 2, d->r_iops,
                             iopsw, 2, d->w_iops,
                             mibw, 2, d->r_mib,
                             mibw, 2, d->w_mib,
                             latw, 4, d->r_lat,
-                            latw, 4, d->w_lat);
+                            latw, 4, d->w_lat,
+                            disk_pad, "");
+                        if (is_highlighted) printf(CLR_RESET);
+                        putchar('\n');
+                        lines_printed++;
+                    }
+                    free(disk_filtered);
+
+                    // Showing info - pinned to row above bottom bar
+                    {
+                        int end_row = scroll_offset + visible_rows;
+                        if (end_row > disk_fcount) end_row = disk_fcount;
+                        char showbuf[128];
+                        snprintf(showbuf, sizeof(showbuf), "Showing %d-%d of %d",
+                            scroll_offset + 1, end_row > 0 ? end_row : 0, disk_fcount);
+                        printf("\033[%d;1H\033[2K", term_rows - 1);
+                        printf(CLR_SCROLLINFO "%*s" CLR_RESET, cols, showbuf);
                     }
                 } else { // MODE_PROCESS
-                    vec_t *view_list = &curr_proc; 
-
+                    // Sort aggregated process list
                     switch(sort_col_proc) {
-                        case SORT_PID: qsort(view_list->data, view_list->len, sizeof(sample_t), cmp_pid); break;
-                        case SORT_CPU: qsort(view_list->data, view_list->len, sizeof(sample_t), cmp_cpu); break;
-                        case SORT_LOG_R: qsort(view_list->data, view_list->len, sizeof(sample_t), cmp_logr); break;
-                        case SORT_LOG_W: qsort(view_list->data, view_list->len, sizeof(sample_t), cmp_logw); break;
-                        case SORT_WAIT: qsort(view_list->data, view_list->len, sizeof(sample_t), cmp_wait); break;
-                        case SORT_RMIB: qsort(view_list->data, view_list->len, sizeof(sample_t), cmp_rmib); break;
-                        case SORT_WMIB: qsort(view_list->data, view_list->len, sizeof(sample_t), cmp_wmib); break;
-                        default: qsort(view_list->data, view_list->len, sizeof(sample_t), cmp_cpu); break;
+                        case SORT_PID: qsort(curr_proc.data, curr_proc.len, sizeof(sample_t), cmp_pid); break;
+                        case SORT_CPU: qsort(curr_proc.data, curr_proc.len, sizeof(sample_t), cmp_cpu); break;
+                        case SORT_LOG_R: qsort(curr_proc.data, curr_proc.len, sizeof(sample_t), cmp_logr); break;
+                        case SORT_LOG_W: qsort(curr_proc.data, curr_proc.len, sizeof(sample_t), cmp_logw); break;
+                        case SORT_WAIT: qsort(curr_proc.data, curr_proc.len, sizeof(sample_t), cmp_wait); break;
+                        case SORT_RMIB: qsort(curr_proc.data, curr_proc.len, sizeof(sample_t), cmp_rmib); break;
+                        case SORT_WMIB: qsort(curr_proc.data, curr_proc.len, sizeof(sample_t), cmp_wmib); break;
+                        case SORT_STATE: qsort(curr_proc.data, curr_proc.len, sizeof(sample_t), cmp_state); break;
+                        default: qsort(curr_proc.data, curr_proc.len, sizeof(sample_t), cmp_cpu); break;
+                    }
+
+                    // Build tree view: parent rows interleaved with child threads
+                    vec_t *view_list;
+                    if (show_tree) {
+                        vec_free(&curr_tree); vec_init(&curr_tree);
+                        for (size_t pi = 0; pi < curr_proc.len; pi++) {
+                            vec_push(&curr_tree, &curr_proc.data[pi]); // parent
+                            pid_t tgid = curr_proc.data[pi].tgid;
+                            for (size_t ti = 0; ti < curr_raw.len; ti++) {
+                                if (curr_raw.data[ti].tgid == tgid && curr_raw.data[ti].pid != tgid)
+                                    vec_push(&curr_tree, &curr_raw.data[ti]); // child thread
+                            }
+                        }
+                        view_list = &curr_tree;
+                    } else {
+                        view_list = &curr_proc;
                     }
 
                     // Column Widths
                     int pidw = 10, cpuw = 8, memw = 10, userw = 10, uptimew=10, statew = 5, iopsw=10, waitw=8, mibw=10;
-                    
+
                     // Headers
-                    int fixed_width = pidw + 1 + cpuw + 1 + 
-                                      memw + 1 + memw + 1 + memw + 1 + 
-                                      uptimew + 1 + userw + 1 + 
-                                      iopsw + 1 + iopsw + 1 + 
-                                      waitw + 1 + 
-                                      mibw + 1 + mibw + 1 + 
+                    int fixed_width = pidw + 1 + cpuw + 1 +
+                                      memw + 1 + memw + 1 + memw + 1 +
+                                      uptimew + 1 + userw + 1 +
+                                      iopsw + 1 + iopsw + 1 +
+                                      waitw + 1 +
+                                      mibw + 1 + mibw + 1 +
                                       statew + 1;
-                                      
-                    int cmdw = cols - fixed_width; 
+
+                    int cmdw = cols - fixed_width;
                     if (cmdw < 10) cmdw = 10;
 
-                    printf("%*s %-*s %*s %*s %*s %*s %*s %*s %*s %*s %*s %*s %*s %s\n",
+                    printf(CLR_COLHDR "%*s %-*s %*s %*s %*s %*s %*s %*s %*s %*s %*s %*s %*s %-*s" CLR_RESET "\n",
                         pidw, "[1] PID",
                         userw, "User",
                         uptimew, "Uptime",
@@ -1214,16 +1470,17 @@ int main(int argc, char **argv) {
                         mibw, "[7] W_MiB",
                         cpuw, "[2] CPU%",
                         statew, "[8] S",
-                        "COMMAND"
+                        cmdw, "COMMAND"
                     );
-                    
-                    for(int i=0; i<cols; i++) putchar('-');
-                    putchar('\n');
+
+                    printf(CLR_SEPARATOR);
+                    for(int i=0; i<cols; i++) printf("\xe2\x94\x80"); // ─
+                    printf(CLR_RESET "\n");
 
                     // Calc totals
                     double t_cpu=0, t_ri=0, t_wi=0, t_rm=0, t_wm=0, t_wt=0;
                     double t_res=0, t_shr=0, t_virt=0;
-                    
+
                     for(size_t i=0; i<curr_raw.len; i++) {
                         t_cpu += curr_raw.data[i].cpu_pct;
                         t_ri  += curr_raw.data[i].r_iops;
@@ -1231,28 +1488,71 @@ int main(int argc, char **argv) {
                         t_rm  += curr_raw.data[i].r_mib;
                         t_wm  += curr_raw.data[i].w_mib;
                         t_wt  += curr_raw.data[i].io_wait_ms;
-                        
+
                         t_res  += (double)curr_raw.data[i].mem_res_pages * 4096.0 / 1048576.0;
                         t_shr  += (double)curr_raw.data[i].mem_shr_pages * 4096.0 / 1048576.0;
                         t_virt += (double)curr_raw.data[i].mem_virt_pages * 4096.0 / 1048576.0;
                     }
 
-                    int limit = display_limit; 
-                    if ((size_t)limit > view_list->len) limit = view_list->len;
-                    
+                    // Build filtered index list
+                    int *filtered_idx = NULL;
+                    int filtered_count = 0;
+                    {
+                        int filt_cap = (int)view_list->len;
+                        if (filt_cap < 16) filt_cap = 16;
+                        filtered_idx = (int *)malloc(filt_cap * sizeof(int));
+                        for (size_t fi = 0; fi < view_list->len; fi++) {
+                            const sample_t *fc = &view_list->data[fi];
+                            // Hide system processes/threads (names in [brackets])
+                            if (hide_system && fc->cmd[0] == '[') continue;
+                            if (strlen(filter_str) > 0) {
+                                char fpbuf[32];
+                                snprintf(fpbuf, sizeof(fpbuf), "%d", fc->tgid);
+                                if (!strcasestr(fc->cmd, filter_str) && !strcasestr(fpbuf, filter_str) && !strcasestr(fc->user, filter_str)) continue;
+                            }
+                            filtered_idx[filtered_count++] = (int)fi;
+                        }
+                    }
+
+                    // Calculate visible rows from terminal size
+                    // Header rows: 1 (title bar) + 1 (CPU/RAM) + 1 (column headers) + 1 (separator) = 4
+                    // Footer rows: 1 (separator) + 1 (totals) + 1 (showing) + 1 (bottom bar) = 4
+                    int term_rows = get_term_rows();
+                    int header_rows = 4;
+                    int footer_rows = 4;
+                    int visible_rows = term_rows - header_rows - footer_rows;
+                    if (visible_rows < 1) visible_rows = 1;
+
+                    // Apply display_limit if smaller
+                    if (display_limit < visible_rows) visible_rows = display_limit;
+
+                    // Clamp cursor_pos
+                    if (cursor_pos < 0) cursor_pos = 0;
+                    if (cursor_pos >= filtered_count) cursor_pos = filtered_count > 0 ? filtered_count - 1 : 0;
+
+                    // Auto-scroll to keep cursor visible
+                    if (cursor_pos < scroll_offset) scroll_offset = cursor_pos;
+                    if (cursor_pos >= scroll_offset + visible_rows) scroll_offset = cursor_pos - visible_rows + 1;
+
+                    // Clamp scroll_offset
+                    int max_offset = filtered_count - visible_rows;
+                    if (max_offset < 0) max_offset = 0;
+                    if (scroll_offset > max_offset) scroll_offset = max_offset;
+                    if (scroll_offset < 0) scroll_offset = 0;
+
                     struct sysinfo si;
                     sysinfo(&si);
                     long uptime_sec = si.uptime;
 
-                    for (int i=0; i<limit; i++) {
-                        const sample_t *c = &view_list->data[i];
-                        char pidbuf[32];
-                        snprintf(pidbuf, sizeof(pidbuf), "%d", c->tgid);
+                    int lines_printed = 0;
+                    for (int fi = scroll_offset; fi < filtered_count && lines_printed < visible_rows; fi++) {
+                        const sample_t *c = &view_list->data[filtered_idx[fi]];
+                        int is_thread = (c->pid != c->tgid);
+                        int is_highlighted = (fi == cursor_pos);
 
-                        if (strlen(filter_str) > 0) {
-                             if (!strcasestr(c->cmd, filter_str) && !strcasestr(pidbuf, filter_str) && !strcasestr(c->user, filter_str)) continue;
-                        }
-                        
+                        char pidbuf[32];
+                        snprintf(pidbuf, sizeof(pidbuf), "%d", c->pid);
+
                         double res_mib = (double)c->mem_res_pages * 4096.0 / 1048576.0;
                         double shr_mib = (double)c->mem_shr_pages * 4096.0 / 1048576.0;
                         double virt_mib = (double)c->mem_virt_pages * 4096.0 / 1048576.0;
@@ -1266,31 +1566,52 @@ int main(int argc, char **argv) {
                         if (days > 0) snprintf(uptime_buf, 32, "%dd%02dh", days, hrs);
                         else snprintf(uptime_buf, 32, "%02d:%02d:%02d", hrs, mins, secs);
 
-                        printf("%*s %-*s %*s %*.0f %*.0f %*.0f %*.0f %*.0f %*.*f %*.*f %*.*f %*.*f %*c ",
-                            pidw, pidbuf,
-                            userw, c->user,
-                            uptimew, uptime_buf,
-                            memw, res_mib,
-                            memw, shr_mib,
-                            memw, virt_mib,
-                            iopsw, c->r_iops,
-                            iopsw, c->w_iops,
-                            waitw, 2, c->io_wait_ms,
-                            mibw, 2, c->r_mib,
-                            mibw, 2, c->w_mib,
-                            cpuw, 2, c->cpu_pct,
-                            statew, c->state);
-                        fprint_trunc(stdout, c->cmd, cmdw);
-                        putchar('\n');
+                        if (is_highlighted) printf(CLR_HIGHLIGHT);
 
-                        if (show_tree) {
-                            print_threads_for_tgid(&curr_raw, c->tgid, pidw, cpuw, iopsw, waitw, mibw, statew, cmdw);
+                        if (is_thread) {
+                            // Thread row: blank user/uptime, zero memory
+                            printf("%*s %-*s %*s %*.0f %*.0f %*.0f %*.0f %*.0f %*.*f %*.*f %*.*f %*.*f %*c ",
+                                pidw, pidbuf, userw, "", uptimew, "",
+                                memw, 0.0, memw, 0.0, memw, 0.0,
+                                iopsw, c->r_iops, iopsw, c->w_iops,
+                                waitw, 2, c->io_wait_ms,
+                                mibw, 2, c->r_mib, mibw, 2, c->w_mib,
+                                cpuw, 2, c->cpu_pct, statew, c->state);
+                            // Tree connector: check if last child
+                            int is_last = 1;
+                            if (fi + 1 < filtered_count) {
+                                const sample_t *next = &view_list->data[filtered_idx[fi + 1]];
+                                if (next->tgid == c->tgid && next->pid != next->tgid)
+                                    is_last = 0;
+                            }
+                            const char *conn = is_last ? "\xe2\x94\x94\xe2\x94\x80 " : "\xe2\x94\x9c\xe2\x94\x80 ";
+                            if (!is_highlighted) printf(CLR_TREE);
+                            printf("%s", conn);
+                            if (!is_highlighted) printf(CLR_RESET);
+                            const char *thread_label = (show_thread_alias && c->comm[0]) ? c->comm : c->cmd;
+                            fprint_trunc(stdout, thread_label, cmdw - 3);
+                        } else {
+                            printf("%*s %-*s %*s %*.0f %*.0f %*.0f %*.0f %*.0f %*.*f %*.*f %*.*f %*.*f %*c ",
+                                pidw, pidbuf, userw, c->user, uptimew, uptime_buf,
+                                memw, res_mib, memw, shr_mib, memw, virt_mib,
+                                iopsw, c->r_iops, iopsw, c->w_iops,
+                                waitw, 2, c->io_wait_ms,
+                                mibw, 2, c->r_mib, mibw, 2, c->w_mib,
+                                cpuw, 2, c->cpu_pct, statew, c->state);
+                            fprint_trunc(stdout, c->cmd, cmdw);
                         }
+
+                        if (is_highlighted) printf(CLR_RESET);
+                        putchar('\n');
+                        lines_printed++;
                     }
 
-                    for(int i=0; i<cols; i++) putchar('-');
-                    putchar('\n');
-                    printf("%*s %*s %*s %*.0f %*.0f %*.0f %*.0f %*.0f %*.*f %*.*f %*.*f %*.*f\n",
+                    free(filtered_idx);
+
+                    printf(CLR_SEPARATOR);
+                    for(int i=0; i<cols; i++) printf("\xe2\x94\x80"); // ─
+                    printf(CLR_RESET "\n");
+                    printf(CLR_TOTALS "%*s %*s %*s %*.0f %*.0f %*.0f %*.0f %*.0f %*.*f %*.*f %*.*f %*.*f" CLR_RESET "\n",
                             pidw, "TOTAL",
                             userw, "",
                             uptimew, "",
@@ -1303,7 +1624,41 @@ int main(int argc, char **argv) {
                             mibw, 0, t_rm,
                             mibw, 0, t_wm,
                             cpuw, 2, t_cpu);
+
+                    // Show process count / scroll info - pinned to row above bottom bar
+                    {
+                        char mode_tag[64] = "";
+                        if (show_tree && show_thread_alias) snprintf(mode_tag, sizeof(mode_tag), " (threads/alias)");
+                        else if (show_tree) snprintf(mode_tag, sizeof(mode_tag), " (threads)");
+                        else if (show_thread_alias) snprintf(mode_tag, sizeof(mode_tag), " (alias)");
+
+                        int end_row = scroll_offset + visible_rows;
+                        if (end_row > filtered_count) end_row = filtered_count;
+                        char showbuf[128];
+                        snprintf(showbuf, sizeof(showbuf), "Showing %d-%d of %d%s",
+                            scroll_offset + 1, end_row > 0 ? end_row : 0, filtered_count, mode_tag);
+                        printf("\033[%d;1H\033[2K", term_rows - 1);
+                        printf(CLR_SCROLLINFO "%*s" CLR_RESET, cols, showbuf);
+                    }
                 }
+
+                // Bottom status bar - position at last terminal row
+                {
+                    int term_rows = get_term_rows();
+                    int term_cols = get_term_cols();
+                    printf("\033[%d;1H", term_rows);
+                    printf(CLR_BOTTOMBAR);
+                    char bar[512];
+                    snprintf(bar, sizeof(bar),
+                        " [j/k] Scroll  [\xe2\x86\x91\xe2\x86\x93] Arrow  [PgUp/PgDn] Page  [g/G] Top/End  [/] Filter  [q] Quit");
+                    int bar_len = (int)strlen(bar);
+                    // Adjust for multi-byte UTF-8 arrows (2 arrows × 3 bytes each = 6 extra bytes vs 2 display chars)
+                    int bar_display_len = bar_len - 4; // ↑↓ are 3 bytes each but 1 char wide
+                    printf("%s", bar);
+                    for (int bi = bar_display_len; bi < term_cols; bi++) putchar(' ');
+                    printf(CLR_RESET);
+                }
+
                 fflush(stdout);
                 dirty = 0;
             }
@@ -1396,10 +1751,20 @@ int main(int argc, char **argv) {
                     if (c == 'q' || c == 'Q') goto cleanup;
                     if (c == 'f' || c == 'F') { frozen = !frozen; dirty = 1; }
                     if (c == 't' || c == 'T') { show_tree = !show_tree; mode = MODE_PROCESS; dirty = 1; }
+                    if (c == 'a' || c == 'A') { show_thread_alias = !show_thread_alias; dirty = 1; }
+                    if (c == 'h' || c == 'H') { hide_system = !hide_system; cursor_pos = 0; scroll_offset = 0; dirty = 1; }
                     if (c == 'n' || c == 'N') { mode = MODE_NETWORK; dirty = 1; }
                     if (c == 'c' || c == 'C') { mode = MODE_PROCESS; dirty = 1; }
                     if (c == 's' || c == 'S') { mode = MODE_STORAGE; dirty = 1; }
-                    
+
+                    // Cursor/scroll keys — move the highlighted cursor line
+                    if (c == KEY_UP || c == 'k') { cursor_pos--; dirty = 1; }
+                    if (c == KEY_DOWN || c == 'j') { cursor_pos++; dirty = 1; }
+                    if (c == KEY_PGUP) { int vr = get_term_rows() - 8; if (vr < 1) vr = 1; cursor_pos -= vr; dirty = 1; }
+                    if (c == KEY_PGDN) { int vr = get_term_rows() - 8; if (vr < 1) vr = 1; cursor_pos += vr; dirty = 1; }
+                    if (c == KEY_HOME || c == 'g') { cursor_pos = 0; dirty = 1; }
+                    if (c == KEY_END || c == 'G') { cursor_pos = INT_MAX / 2; dirty = 1; } // Will be clamped during render
+
                     if (mode == MODE_PROCESS) {
                         if (c == '1' || c == 0x01) { if (sort_col_proc == SORT_PID) sort_desc = !sort_desc; else { sort_col_proc = SORT_PID; sort_desc = 1; } dirty = 1; }
                         if (c == '2' || c == 0x02) { if (sort_col_proc == SORT_CPU) sort_desc = !sort_desc; else { sort_col_proc = SORT_CPU; sort_desc = 1; } dirty = 1; }
@@ -1408,9 +1773,14 @@ int main(int argc, char **argv) {
                         if (c == '5' || c == 0x05) { if (sort_col_proc == SORT_WAIT) sort_desc = !sort_desc; else { sort_col_proc = SORT_WAIT; sort_desc = 1; } dirty = 1; }
                         if (c == '6' || c == 0x06) { if (sort_col_proc == SORT_RMIB) sort_desc = !sort_desc; else { sort_col_proc = SORT_RMIB; sort_desc = 1; } dirty = 1; }
                         if (c == '7' || c == 0x07) { if (sort_col_proc == SORT_WMIB) sort_desc = !sort_desc; else { sort_col_proc = SORT_WMIB; sort_desc = 1; } dirty = 1; }
-                    } else { // MODE_NETWORK
-                        if (c == '1' || c == 0x01) { sort_col_net = SORT_NET_RX; dirty = 1; }
-                        if (c == '2' || c == 0x02) { sort_col_net = SORT_NET_TX; dirty = 1; }
+                        if (c == '8' || c == 0x08) { if (sort_col_proc == SORT_STATE) sort_desc = !sort_desc; else { sort_col_proc = SORT_STATE; sort_desc = 1; } dirty = 1; }
+                    } else if (mode == MODE_NETWORK) {
+                        if (c == '1' || c == 0x01) { if (sort_col_net == SORT_NET_RX) sort_desc = !sort_desc; else { sort_col_net = SORT_NET_RX; sort_desc = 1; } dirty = 1; }
+                        if (c == '2' || c == 0x02) { if (sort_col_net == SORT_NET_TX) sort_desc = !sort_desc; else { sort_col_net = SORT_NET_TX; sort_desc = 1; } dirty = 1; }
+                        if (c == '3' || c == 0x03) { if (sort_col_net == SORT_NET_RX_PKT) sort_desc = !sort_desc; else { sort_col_net = SORT_NET_RX_PKT; sort_desc = 1; } dirty = 1; }
+                        if (c == '4' || c == 0x04) { if (sort_col_net == SORT_NET_TX_PKT) sort_desc = !sort_desc; else { sort_col_net = SORT_NET_TX_PKT; sort_desc = 1; } dirty = 1; }
+                        if (c == '5' || c == 0x05) { if (sort_col_net == SORT_NET_RX_ERR) sort_desc = !sort_desc; else { sort_col_net = SORT_NET_RX_ERR; sort_desc = 1; } dirty = 1; }
+                        if (c == '6' || c == 0x06) { if (sort_col_net == SORT_NET_TX_ERR) sort_desc = !sort_desc; else { sort_col_net = SORT_NET_TX_ERR; sort_desc = 1; } dirty = 1; }
                     }
 
                     if (mode == MODE_STORAGE) {
@@ -1440,6 +1810,7 @@ cleanup:
     vec_free(&prev);
     vec_free(&curr_raw);
     vec_free(&curr_proc);
+    vec_free(&curr_tree);
     vec_net_free(&prev_net);
     vec_net_free(&curr_net);
     vec_disk_free(&prev_disk);
