@@ -1302,7 +1302,7 @@ int main(int argc, char **argv) {
                             pktw, 0, n->rx_pps, pktw, 0, n->tx_pps,
                             errw, 0, n->rx_errs_ps, errw, 0, n->tx_errs_ps,
                             vmid_buf, n->vm_name);
-                        if (is_highlighted) printf(CLR_RESET);
+                        if (is_highlighted) printf("\033[K" CLR_RESET);
                         putchar('\n');
                         lines_printed++;
                     }
@@ -1386,7 +1386,7 @@ int main(int argc, char **argv) {
                             mibw, 2, d->w_mib,
                             latw, 4, d->r_lat,
                             latw, 4, d->w_lat);
-                        if (is_highlighted) printf(CLR_RESET);
+                        if (is_highlighted) printf("\033[K" CLR_RESET);
                         putchar('\n');
                         lines_printed++;
                     }
@@ -1593,7 +1593,7 @@ int main(int argc, char **argv) {
                             fprint_trunc(stdout, c->cmd, cmdw);
                         }
 
-                        if (is_highlighted) printf(CLR_RESET);
+                        if (is_highlighted) printf("\033[K" CLR_RESET);
                         putchar('\n');
                         lines_printed++;
                     }
