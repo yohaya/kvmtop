@@ -1,9 +1,10 @@
-name: Dev Build and Release
+name: Build and Release
 
 on:
   push:
     branches:
       - dev
+      - main
     paths:
       - 'src/**'
       - 'Makefile'
@@ -25,8 +26,15 @@ jobs:
       uses: actions/checkout@v4
 
     - name: Generate Version Tag
-      id: tag
-      run: echo "VERSION=dev-$(date +'%Y.%m.%d').${{ github.run_number }}" >> $GITHUB_ENV
+      run: |
+        DATE_TAG="$(date +'%Y.%m.%d').${{ github.run_number }}"
+        if [ "${{ github.ref_name }}" = "main" ]; then
+          echo "VERSION=${DATE_TAG}" >> $GITHUB_ENV
+          echo "IS_DEV=false" >> $GITHUB_ENV
+        else
+          echo "VERSION=dev-${DATE_TAG}" >> $GITHUB_ENV
+          echo "IS_DEV=true" >> $GITHUB_ENV
+        fi
 
     - name: Build
       run: |
@@ -45,47 +53,48 @@ jobs:
         git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git"
         git add -f kvmtop
         git diff --cached --quiet && echo "No changes to commit" || git commit -m "Update compiled kvmtop binary [skip ci]"
-        git push origin HEAD:dev
+        git push origin HEAD:${{ github.ref_name }}
 
     - name: Upload Build Artifact
       uses: actions/upload-artifact@v4
       with:
-        name: kvmtop-dev-build
+        name: kvmtop-${{ env.IS_DEV == 'true' && 'dev' || 'release' }}-build
         path: build/kvmtop-static-linux-amd64
 
-    - name: Release Development Version
+    - name: Release Version
       uses: softprops/action-gh-release@v1
       with:
         tag_name: ${{ env.VERSION }}
-        name: Development Build ${{ env.VERSION }}
+        name: ${{ env.IS_DEV == 'true' && format('Development Build {0}', env.VERSION) || format('Release {0}', env.VERSION) }}
         body: |
-          Automated development build from dev branch
-
-          **Commit:** ${{ github.sha }}
-          **Build Date:** $(date -u +'%Y-%m-%d %H:%M:%S UTC')
-
-          ⚠️ This is a pre-release build from the development branch. Use at your own risk.
-        files: build/kvmtop-static-linux-amd64
-        draft: false
-        prerelease: true
-
-    - name: Update Dev-Latest Tag
-      uses: softprops/action-gh-release@v1
-      with:
-        tag_name: dev-latest
-        name: Latest Development Build
-        body: |
-          Latest automated build from dev branch
+          ${{ env.IS_DEV == 'true' && 'Automated development build from dev branch' || 'Release build from main branch' }}
 
           **Version:** ${{ env.VERSION }}
           **Commit:** ${{ github.sha }}
 
-          ⚠️ This is a rolling pre-release tag that always points to the latest dev build.
+          ${{ env.IS_DEV == 'true' && '⚠️ This is a pre-release build from the development branch. Use at your own risk.' || '✅ Stable release from the main branch.' }}
         files: build/kvmtop-static-linux-amd64
         draft: false
-        prerelease: true
+        prerelease: ${{ env.IS_DEV }}
 
-    - name: Cleanup Old Dev Releases
+    - name: Update Latest Tag
+      uses: softprops/action-gh-release@v1
+      with:
+        tag_name: ${{ env.IS_DEV == 'true' && 'dev-latest' || 'latest' }}
+        name: ${{ env.IS_DEV == 'true' && 'Latest Development Build' || 'Latest Release' }}
+        body: |
+          ${{ env.IS_DEV == 'true' && 'Latest automated build from dev branch' || 'Latest stable release from main branch' }}
+
+          **Version:** ${{ env.VERSION }}
+          **Commit:** ${{ github.sha }}
+
+          ${{ env.IS_DEV == 'true' && '⚠️ This is a rolling pre-release tag that always points to the latest dev build.' || '✅ This is a rolling tag that always points to the latest stable release.' }}
+        files: build/kvmtop-static-linux-amd64
+        draft: false
+        prerelease: ${{ env.IS_DEV }}
+
+    - name: Cleanup Old Releases
+      if: env.IS_DEV == 'true'
       env:
         GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: |
