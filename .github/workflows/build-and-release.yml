@@ -4,6 +4,10 @@ on:
   push:
     branches:
       - dev
+    paths:
+      - 'src/**'
+      - 'Makefile'
+      - '.github/workflows/build-and-release.yml'
 
 permissions:
   contents: write
@@ -28,6 +32,16 @@ jobs:
       run: |
         make VERSION=${{ env.VERSION }}
         mv build/kvmtop build/kvmtop-static-linux-amd64
+
+    - name: Commit executable to branch
+      run: |
+        cp build/kvmtop-static-linux-amd64 kvmtop
+        chmod +x kvmtop
+        git config user.name "github-actions[bot]"
+        git config user.email "github-actions[bot]@users.noreply.github.com"
+        git add kvmtop
+        git diff --cached --quiet && echo "No changes to commit" || git commit -m "Update compiled kvmtop binary [skip ci]"
+        git push
 
     - name: Upload Build Artifact
       uses: actions/upload-artifact@v4

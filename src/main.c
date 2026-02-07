@@ -228,6 +228,14 @@ static void enable_raw_mode() {
     printf("\033[?25l"); 
 }
 
+// Special key constants (above ASCII range)
+#define KEY_UP      256
+#define KEY_DOWN    257
+#define KEY_PGUP    258
+#define KEY_PGDN    259
+#define KEY_HOME    260
+#define KEY_END     261
+
 static int wait_for_input(double seconds) {
     if (seconds < 0) seconds = 0;
     struct timeval tv;
@@ -240,10 +248,46 @@ static int wait_for_input(double seconds) {
     FD_SET(STDIN_FILENO, &fds);
 
     int ret = select(STDIN_FILENO + 1, &fds, NULL, NULL, &tv);
-    
+
     if (ret > 0) {
         unsigned char c;
-        if (read(STDIN_FILENO, &c, 1) == 1) return c;
+        if (read(STDIN_FILENO, &c, 1) == 1) {
+            if (c == 27) { // ESC - check for escape sequence
+                // Brief wait to see if more bytes follow
+                struct timeval short_tv = {0, 50000}; // 50ms
+                fd_set fds2;
+                FD_ZERO(&fds2);
+                FD_SET(STDIN_FILENO, &fds2);
+                if (select(STDIN_FILENO + 1, &fds2, NULL, NULL, &short_tv) > 0) {
+                    unsigned char seq1;
+                    if (read(STDIN_FILENO, &seq1, 1) == 1 && seq1 == '[') {
+                        unsigned char seq2;
+                        if (read(STDIN_FILENO, &seq2, 1) == 1) {
+                            switch (seq2) {
+                                case 'A': return KEY_UP;
+                                case 'B': return KEY_DOWN;
+                                case 'H': return KEY_HOME;
+                                case 'F': return KEY_END;
+                                case '5': // Page Up: ESC [ 5 ~
+                                    read(STDIN_FILENO, &seq2, 1); // consume '~'
+                                    return KEY_PGUP;
+                                case '6': // Page Down: ESC [ 6 ~
+                                    read(STDIN_FILENO, &seq2, 1); // consume '~'
+                                    return KEY_PGDN;
+                                case '1': // Home: ESC [ 1 ~
+                                    read(STDIN_FILENO, &seq2, 1); // consume '~'
+                                    return KEY_HOME;
+                                case '4': // End: ESC [ 4 ~
+                                    read(STDIN_FILENO, &seq2, 1); // consume '~'
+                                    return KEY_END;
+                            }
+                        }
+                    }
+                }
+                return 27; // Plain ESC
+            }
+            return c;
+        }
     }
     return 0; // Timeout or error
 }
@@ -255,6 +299,15 @@ static int get_term_cols(void) {
         if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0) if (ws.ws_col > 0) cols = ws.ws_col;
     }
     return cols;
+}
+
+static int get_term_rows(void) {
+    int rows = 40;
+    if (isatty(STDOUT_FILENO)) {
+        struct winsize ws;
+        if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0) if (ws.ws_row > 0) rows = ws.ws_row;
+    }
+    return rows;
 }
 
 static void fprint_trunc(FILE *out, const char *s, int width) {
@@ -822,21 +875,26 @@ static void aggregate_by_tgid(const vec_t *src, vec_t *dst) {
 }
 
 // Tree view helper
-static void print_threads_for_tgid(const vec_t *raw, pid_t tgid, int pidw, int cpuw, int iopsw, int waitw, int mibw, int statew, int cmdw) {
+static void print_threads_for_tgid(const vec_t *raw, pid_t tgid, int pidw, int userw, int uptimew, int memw, int iopsw, int waitw, int mibw, int cpuw, int statew, int cmdw) {
     for (size_t i = 0; i < raw->len; i++) {
         const sample_t *s = &raw->data[i];
-        if (s->tgid == tgid && s->pid != tgid) { 
+        if (s->tgid == tgid && s->pid != tgid) {
             char pidbuf[32];
             snprintf(pidbuf, sizeof(pidbuf), "  └─ %d", s->pid); // Indent
-            
-            printf("%*s %*.*f %*.0f %*.0f %*.*f %*.*f %*.*f %*c ",
+
+            printf("%*s %-*s %*s %*.0f %*.0f %*.0f %*.0f %*.0f %*.*f %*.*f %*.*f %*.*f %*c ",
                 pidw, pidbuf,
-                cpuw, 2, s->cpu_pct,
+                userw, "",
+                uptimew, "",
+                memw, 0.0,
+                memw, 0.0,
+                memw, 0.0,
                 iopsw, s->r_iops,
                 iopsw, s->w_iops,
                 waitw, 2, s->io_wait_ms,
                 mibw, 2, s->r_mib,
                 mibw, 2, s->w_mib,
+                cpuw, 2, s->cpu_pct,
                 statew, s->state);
             fprint_trunc(stdout, s->cmd, cmdw);
             putchar('\n');
@@ -850,8 +908,9 @@ int main(int argc, char **argv) {
         sleep(2);
     }
 
-    double interval = 5.0; 
+    double interval = 5.0;
     int display_limit = 50;
+    int scroll_offset = 0;
     int show_tree = 0;
     int frozen = 0;
     char filter_str[64] = {0};
@@ -1049,7 +1108,7 @@ int main(int argc, char **argv) {
                 printf("\033[2J\033[H"); 
                 int cols = get_term_cols();
                 
-                char left[128], right[128];
+                char left[128], right[256];
                 snprintf(left, sizeof(left), "kvmtop %s", KVM_VERSION);
                 
                 if (in_filter_mode) {
@@ -1063,7 +1122,7 @@ int main(int argc, char **argv) {
                     char f_info[40] = "";
                     if (strlen(filter_str) > 0) snprintf(f_info, sizeof(f_info), "Filter: %s | ", filter_str);
                     
-                    snprintf(right, sizeof(right), "%s[r] Refresh=%.1fs | [c] CPU | [s] Storage | [n] Net | [t] Tree | [l] Limit(%d) | [f] Freeze: %s | [/] Filter | [q] Quit", 
+                    snprintf(right, sizeof(right), "%s[jk/arrows] Scroll | [PgUp/PgDn] Page | [r] Refresh=%.1fs | [c] CPU | [s] Storage | [n] Net | [t] Tree | [l] Limit(%d) | [f] Freeze: %s | [/] Filter | [q] Quit",
                              f_info, interval, display_limit, frozen ? "ON" : "OFF");
                 }
                 
@@ -1223,7 +1282,7 @@ int main(int argc, char **argv) {
                     // Calc totals
                     double t_cpu=0, t_ri=0, t_wi=0, t_rm=0, t_wm=0, t_wt=0;
                     double t_res=0, t_shr=0, t_virt=0;
-                    
+
                     for(size_t i=0; i<curr_raw.len; i++) {
                         t_cpu += curr_raw.data[i].cpu_pct;
                         t_ri  += curr_raw.data[i].r_iops;
@@ -1231,28 +1290,67 @@ int main(int argc, char **argv) {
                         t_rm  += curr_raw.data[i].r_mib;
                         t_wm  += curr_raw.data[i].w_mib;
                         t_wt  += curr_raw.data[i].io_wait_ms;
-                        
+
                         t_res  += (double)curr_raw.data[i].mem_res_pages * 4096.0 / 1048576.0;
                         t_shr  += (double)curr_raw.data[i].mem_shr_pages * 4096.0 / 1048576.0;
                         t_virt += (double)curr_raw.data[i].mem_virt_pages * 4096.0 / 1048576.0;
                     }
 
-                    int limit = display_limit; 
-                    if ((size_t)limit > view_list->len) limit = view_list->len;
-                    
+                    // Build filtered index list
+                    int *filtered_idx = NULL;
+                    int filtered_count = 0;
+                    {
+                        int filt_cap = (int)view_list->len;
+                        if (filt_cap < 16) filt_cap = 16;
+                        filtered_idx = (int *)malloc(filt_cap * sizeof(int));
+                        for (size_t fi = 0; fi < view_list->len; fi++) {
+                            const sample_t *fc = &view_list->data[fi];
+                            if (strlen(filter_str) > 0) {
+                                char fpbuf[32];
+                                snprintf(fpbuf, sizeof(fpbuf), "%d", fc->tgid);
+                                if (!strcasestr(fc->cmd, filter_str) && !strcasestr(fpbuf, filter_str) && !strcasestr(fc->user, filter_str)) continue;
+                            }
+                            filtered_idx[filtered_count++] = (int)fi;
+                        }
+                    }
+
+                    // Calculate visible rows from terminal size
+                    // Header rows: 1 (title bar) + 1 (CPU/RAM) + 1 (scroll info) + 1 (column headers) + 1 (separator) = 5
+                    // Footer rows: 1 (separator) + 1 (totals) = 2
+                    int term_rows = get_term_rows();
+                    int header_rows = 5;
+                    int footer_rows = 2;
+                    int visible_rows = term_rows - header_rows - footer_rows;
+                    if (visible_rows < 1) visible_rows = 1;
+
+                    // Apply display_limit if smaller
+                    if (display_limit < visible_rows) visible_rows = display_limit;
+
+                    // Clamp scroll_offset
+                    int max_offset = filtered_count - visible_rows;
+                    if (max_offset < 0) max_offset = 0;
+                    if (scroll_offset > max_offset) scroll_offset = max_offset;
+                    if (scroll_offset < 0) scroll_offset = 0;
+
+                    // Show scroll position indicator
+                    if (filtered_count > visible_rows) {
+                        int end_row = scroll_offset + visible_rows;
+                        if (end_row > filtered_count) end_row = filtered_count;
+                        printf("[Row %d-%d of %d]  ", scroll_offset + 1, end_row, filtered_count);
+                    }
+                    printf("Processes: %d", filtered_count);
+                    putchar('\n');
+
                     struct sysinfo si;
                     sysinfo(&si);
                     long uptime_sec = si.uptime;
 
-                    for (int i=0; i<limit; i++) {
-                        const sample_t *c = &view_list->data[i];
+                    int lines_printed = 0;
+                    for (int fi = scroll_offset; fi < filtered_count && lines_printed < visible_rows; fi++) {
+                        const sample_t *c = &view_list->data[filtered_idx[fi]];
                         char pidbuf[32];
                         snprintf(pidbuf, sizeof(pidbuf), "%d", c->tgid);
 
-                        if (strlen(filter_str) > 0) {
-                             if (!strcasestr(c->cmd, filter_str) && !strcasestr(pidbuf, filter_str) && !strcasestr(c->user, filter_str)) continue;
-                        }
-                        
                         double res_mib = (double)c->mem_res_pages * 4096.0 / 1048576.0;
                         double shr_mib = (double)c->mem_shr_pages * 4096.0 / 1048576.0;
                         double virt_mib = (double)c->mem_virt_pages * 4096.0 / 1048576.0;
@@ -1282,11 +1380,19 @@ int main(int argc, char **argv) {
                             statew, c->state);
                         fprint_trunc(stdout, c->cmd, cmdw);
                         putchar('\n');
+                        lines_printed++;
 
                         if (show_tree) {
-                            print_threads_for_tgid(&curr_raw, c->tgid, pidw, cpuw, iopsw, waitw, mibw, statew, cmdw);
+                            print_threads_for_tgid(&curr_raw, c->tgid, pidw, userw, uptimew, memw, iopsw, waitw, mibw, cpuw, statew, cmdw);
+                            // Count thread lines against visible rows
+                            for (size_t ti = 0; ti < curr_raw.len && lines_printed < visible_rows; ti++) {
+                                if (curr_raw.data[ti].tgid == c->tgid && curr_raw.data[ti].pid != c->tgid)
+                                    lines_printed++;
+                            }
                         }
                     }
+
+                    free(filtered_idx);
 
                     for(int i=0; i<cols; i++) putchar('-');
                     putchar('\n');
@@ -1399,7 +1505,15 @@ int main(int argc, char **argv) {
                     if (c == 'n' || c == 'N') { mode = MODE_NETWORK; dirty = 1; }
                     if (c == 'c' || c == 'C') { mode = MODE_PROCESS; dirty = 1; }
                     if (c == 's' || c == 'S') { mode = MODE_STORAGE; dirty = 1; }
-                    
+
+                    // Scroll keys
+                    if (c == KEY_UP || c == 'k') { scroll_offset--; if (scroll_offset < 0) scroll_offset = 0; dirty = 1; }
+                    if (c == KEY_DOWN || c == 'j') { scroll_offset++; dirty = 1; }
+                    if (c == KEY_PGUP) { int vr = get_term_rows() - 7; if (vr < 1) vr = 1; scroll_offset -= vr; if (scroll_offset < 0) scroll_offset = 0; dirty = 1; }
+                    if (c == KEY_PGDN) { int vr = get_term_rows() - 7; if (vr < 1) vr = 1; scroll_offset += vr; dirty = 1; }
+                    if (c == KEY_HOME || c == 'g') { scroll_offset = 0; dirty = 1; }
+                    if (c == KEY_END || c == 'G') { scroll_offset = INT_MAX / 2; dirty = 1; } // Will be clamped during render
+
                     if (mode == MODE_PROCESS) {
                         if (c == '1' || c == 0x01) { if (sort_col_proc == SORT_PID) sort_desc = !sort_desc; else { sort_col_proc = SORT_PID; sort_desc = 1; } dirty = 1; }
                         if (c == '2' || c == 0x02) { if (sort_col_proc == SORT_CPU) sort_desc = !sort_desc; else { sort_col_proc = SORT_CPU; sort_desc = 1; } dirty = 1; }
