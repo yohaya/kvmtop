@@ -8,7 +8,7 @@ on:
     paths:
       - 'src/**'
       - 'Makefile'
-      - '.github/workflows/build-and-release.yml'
+      - '.github/workflows/**'
 
 permissions:
   contents: write
@@ -78,20 +78,20 @@ jobs:
         prerelease: ${{ env.IS_DEV }}
 
     - name: Update Latest Tag
-      uses: softprops/action-gh-release@v1
-      with:
-        tag_name: ${{ env.IS_DEV == 'true' && 'dev-latest' || 'latest' }}
-        name: ${{ env.IS_DEV == 'true' && 'Latest Development Build' || 'Latest Release' }}
-        body: |
-          ${{ env.IS_DEV == 'true' && 'Latest automated build from dev branch' || 'Latest stable release from main branch' }}
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        TAG_NAME="${{ env.IS_DEV == 'true' && 'dev-latest' || 'latest' }}"
+        RELEASE_NAME="${{ env.IS_DEV == 'true' && 'Latest Development Build' || 'Latest Release' }}"
 
-          **Version:** ${{ env.VERSION }}
-          **Commit:** ${{ github.sha }}
-
-          ${{ env.IS_DEV == 'true' && '⚠️ This is a rolling pre-release tag that always points to the latest dev build.' || '✅ This is a rolling tag that always points to the latest stable release.' }}
-        files: build/kvmtop-static-linux-amd64
-        draft: false
-        prerelease: ${{ env.IS_DEV }}
+        # Delete existing release if it exists, then recreate
+        gh release delete "$TAG_NAME" --cleanup-tag -y 2>/dev/null || true
+        gh release create "$TAG_NAME" \
+          --title "$RELEASE_NAME" \
+          --notes "**Version:** ${{ env.VERSION }}
+        **Commit:** ${{ github.sha }}" \
+          ${{ env.IS_DEV == 'true' && '--prerelease' || '--latest' }} \
+          build/kvmtop-static-linux-amd64
 
     - name: Cleanup Old Releases
       if: env.IS_DEV == 'true'
