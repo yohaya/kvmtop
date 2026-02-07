@@ -781,7 +781,7 @@ static int sort_desc = 1;
 
 // Sort Comparators
 typedef enum { 
-    SORT_PID=1, SORT_CPU, SORT_LOG_R, SORT_LOG_W, SORT_WAIT, SORT_RMIB, SORT_WMIB,
+    SORT_PID=1, SORT_CPU, SORT_LOG_R, SORT_LOG_W, SORT_WAIT, SORT_RMIB, SORT_WMIB, SORT_STATE,
     SORT_NET_RX, SORT_NET_TX,
     SORT_MEM_RES, SORT_MEM_SHR, SORT_MEM_VIRT, SORT_USER, SORT_UPTIME,
     // Disk specific
@@ -825,6 +825,11 @@ static int cmp_wmib(const void *a, const void *b) {
     const sample_t *x = (const sample_t *)a;
     const sample_t *y = (const sample_t *)b;
     return CMP_NUM(x->w_mib, y->w_mib);
+}
+static int cmp_state(const void *a, const void *b) {
+    const sample_t *x = (const sample_t *)a;
+    const sample_t *y = (const sample_t *)b;
+    return CMP_NUM(x->state, y->state);
 }
 static int cmp_net_rx(const void *a, const void *b) {
     const net_iface_t *x = (const net_iface_t *)a;
@@ -1300,6 +1305,7 @@ int main(int argc, char **argv) {
                         case SORT_WAIT: qsort(curr_proc.data, curr_proc.len, sizeof(sample_t), cmp_wait); break;
                         case SORT_RMIB: qsort(curr_proc.data, curr_proc.len, sizeof(sample_t), cmp_rmib); break;
                         case SORT_WMIB: qsort(curr_proc.data, curr_proc.len, sizeof(sample_t), cmp_wmib); break;
+                        case SORT_STATE: qsort(curr_proc.data, curr_proc.len, sizeof(sample_t), cmp_state); break;
                         default: qsort(curr_proc.data, curr_proc.len, sizeof(sample_t), cmp_cpu); break;
                     }
 
@@ -1658,6 +1664,7 @@ int main(int argc, char **argv) {
                         if (c == '5' || c == 0x05) { if (sort_col_proc == SORT_WAIT) sort_desc = !sort_desc; else { sort_col_proc = SORT_WAIT; sort_desc = 1; } dirty = 1; }
                         if (c == '6' || c == 0x06) { if (sort_col_proc == SORT_RMIB) sort_desc = !sort_desc; else { sort_col_proc = SORT_RMIB; sort_desc = 1; } dirty = 1; }
                         if (c == '7' || c == 0x07) { if (sort_col_proc == SORT_WMIB) sort_desc = !sort_desc; else { sort_col_proc = SORT_WMIB; sort_desc = 1; } dirty = 1; }
+                        if (c == '8' || c == 0x08) { if (sort_col_proc == SORT_STATE) sort_desc = !sort_desc; else { sort_col_proc = SORT_STATE; sort_desc = 1; } dirty = 1; }
                     } else { // MODE_NETWORK
                         if (c == '1' || c == 0x01) { sort_col_net = SORT_NET_RX; dirty = 1; }
                         if (c == '2' || c == 0x02) { sort_col_net = SORT_NET_TX; dirty = 1; }
