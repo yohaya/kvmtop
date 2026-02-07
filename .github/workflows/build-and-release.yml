@@ -19,7 +19,7 @@ jobs:
 
     steps:
     - name: Install dependencies
-      run: apk add --no-cache build-base git
+      run: apk add --no-cache build-base git github-cli
 
     - name: Checkout code
       uses: actions/checkout@v4
@@ -34,14 +34,18 @@ jobs:
         mv build/kvmtop build/kvmtop-static-linux-amd64
 
     - name: Commit executable to branch
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: |
         cp build/kvmtop-static-linux-amd64 kvmtop
         chmod +x kvmtop
+        git config --global --add safe.directory "$GITHUB_WORKSPACE"
         git config user.name "github-actions[bot]"
         git config user.email "github-actions[bot]@users.noreply.github.com"
+        git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git"
         git add kvmtop
         git diff --cached --quiet && echo "No changes to commit" || git commit -m "Update compiled kvmtop binary [skip ci]"
-        git push
+        git push origin HEAD:dev
 
     - name: Upload Build Artifact
       uses: actions/upload-artifact@v4
