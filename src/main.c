@@ -1286,17 +1286,14 @@ int main(int argc, char **argv) {
                     }
                     free(net_filtered);
 
-                    // Showing info
+                    // Showing info - pinned to row above bottom bar
                     {
+                        int end_row = scroll_offset + visible_rows;
+                        if (end_row > net_fcount) end_row = net_fcount;
                         char showbuf[128];
-                        if (net_fcount > visible_rows) {
-                            int end_row = scroll_offset + visible_rows;
-                            if (end_row > net_fcount) end_row = net_fcount;
-                            snprintf(showbuf, sizeof(showbuf), "Showing %d-%d of %d",
-                                scroll_offset + 1, end_row, net_fcount);
-                        } else {
-                            snprintf(showbuf, sizeof(showbuf), "Showing %d", net_fcount);
-                        }
+                        snprintf(showbuf, sizeof(showbuf), "Showing %d-%d of %d",
+                            scroll_offset + 1, end_row > 0 ? end_row : 0, net_fcount);
+                        printf("\033[%d;1H", term_rows - 1);
                         printf(CLR_SCROLLINFO "%*s" CLR_RESET, cols, showbuf);
                     }
                 } else if (mode == MODE_STORAGE) {
@@ -1373,17 +1370,14 @@ int main(int argc, char **argv) {
                     }
                     free(disk_filtered);
 
-                    // Showing info
+                    // Showing info - pinned to row above bottom bar
                     {
+                        int end_row = scroll_offset + visible_rows;
+                        if (end_row > disk_fcount) end_row = disk_fcount;
                         char showbuf[128];
-                        if (disk_fcount > visible_rows) {
-                            int end_row = scroll_offset + visible_rows;
-                            if (end_row > disk_fcount) end_row = disk_fcount;
-                            snprintf(showbuf, sizeof(showbuf), "Showing %d-%d of %d",
-                                scroll_offset + 1, end_row, disk_fcount);
-                        } else {
-                            snprintf(showbuf, sizeof(showbuf), "Showing %d", disk_fcount);
-                        }
+                        snprintf(showbuf, sizeof(showbuf), "Showing %d-%d of %d",
+                            scroll_offset + 1, end_row > 0 ? end_row : 0, disk_fcount);
+                        printf("\033[%d;1H", term_rows - 1);
                         printf(CLR_SCROLLINFO "%*s" CLR_RESET, cols, showbuf);
                     }
                 } else { // MODE_PROCESS
@@ -1601,25 +1595,19 @@ int main(int argc, char **argv) {
                             mibw, 0, t_wm,
                             cpuw, 2, t_cpu);
 
-                    // Show process count / scroll info below totals, right-aligned
+                    // Show process count / scroll info - pinned to row above bottom bar
                     {
-                        char showbuf[128];
-                        {
-                            char mode_tag[64] = "";
-                            if (show_tree && show_thread_alias) snprintf(mode_tag, sizeof(mode_tag), " (threads/alias)");
-                            else if (show_tree) snprintf(mode_tag, sizeof(mode_tag), " (threads)");
-                            else if (show_thread_alias) snprintf(mode_tag, sizeof(mode_tag), " (alias)");
+                        char mode_tag[64] = "";
+                        if (show_tree && show_thread_alias) snprintf(mode_tag, sizeof(mode_tag), " (threads/alias)");
+                        else if (show_tree) snprintf(mode_tag, sizeof(mode_tag), " (threads)");
+                        else if (show_thread_alias) snprintf(mode_tag, sizeof(mode_tag), " (alias)");
 
-                            if (filtered_count > visible_rows) {
-                                int end_row = scroll_offset + visible_rows;
-                                if (end_row > filtered_count) end_row = filtered_count;
-                                snprintf(showbuf, sizeof(showbuf), "Showing %d-%d of %d%s",
-                                    scroll_offset + 1, end_row, filtered_count, mode_tag);
-                            } else {
-                                snprintf(showbuf, sizeof(showbuf), "Showing %d%s",
-                                    filtered_count, mode_tag);
-                            }
-                        }
+                        int end_row = scroll_offset + visible_rows;
+                        if (end_row > filtered_count) end_row = filtered_count;
+                        char showbuf[128];
+                        snprintf(showbuf, sizeof(showbuf), "Showing %d-%d of %d%s",
+                            scroll_offset + 1, end_row > 0 ? end_row : 0, filtered_count, mode_tag);
+                        printf("\033[%d;1H", term_rows - 1);
                         printf(CLR_SCROLLINFO "%*s" CLR_RESET, cols, showbuf);
                     }
                 }
