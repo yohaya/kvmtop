@@ -368,17 +368,22 @@ static void sanitize_cmd(char out[CMD_MAX], const char *in, size_t in_len) {
 static int read_cmdline(pid_t pid, char out[CMD_MAX]) {
     char path[PATH_MAX], buf[8192];
     ssize_t n = 0;
-    
+
     snprintf(path, sizeof(path), "/proc/%d/cmdline", pid);
     if (read_small_file(path, buf, sizeof(buf), &n) == 0 && n > 0) {
         sanitize_cmd(out, buf, (size_t)n);
         if (out[0] != '\0' && out[0] != ' ') return 0;
     }
 
+    // cmdline was empty — this is a kernel thread; wrap name in [] like ps does
     snprintf(path, sizeof(path), "/proc/%d/comm", pid);
     if (read_small_file(path, buf, sizeof(buf), &n) == 0 && n > 0) {
-        sanitize_cmd(out, buf, (size_t)n); 
-        if (out[0] != '\0' && out[0] != ' ') return 0;
+        char tmp[CMD_MAX];
+        sanitize_cmd(tmp, buf, (size_t)n);
+        if (tmp[0] != '\0' && tmp[0] != ' ') {
+            snprintf(out, CMD_MAX, "[%s]", tmp);
+            return 0;
+        }
     }
 
     snprintf(path, sizeof(path), "/proc/%d/stat", pid);
@@ -387,9 +392,11 @@ static int read_cmdline(pid_t pid, char out[CMD_MAX]) {
         char *end = strrchr(buf, ')');
         if (start && end && end > start) {
             size_t len = (size_t)(end - start - 1);
-            if (len >= CMD_MAX) len = CMD_MAX - 1;
-            strncpy(out, start + 1, len);
-            out[len] = '\0';
+            if (len >= CMD_MAX - 3) len = CMD_MAX - 3;
+            out[0] = '[';
+            strncpy(out + 1, start + 1, len);
+            out[len + 1] = ']';
+            out[len + 2] = '\0';
             return 0;
         }
     }
