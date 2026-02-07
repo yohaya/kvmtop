@@ -967,6 +967,7 @@ int main(int argc, char **argv) {
     int cursor_pos = 0;
     int show_tree = 0;
     int show_thread_alias = 0;
+    int hide_system = 0;
     int frozen = 0;
     char filter_str[64] = {0};
     int in_filter_mode = 0;
@@ -1177,8 +1178,8 @@ int main(int argc, char **argv) {
                     char f_info[40] = "";
                     if (strlen(filter_str) > 0) snprintf(f_info, sizeof(f_info), "Filter: %s | ", filter_str);
                     
-                    snprintf(right, sizeof(right), "%s[r] Refresh=%.1fs | [c] CPU | [s] Storage | [n] Net | [t] Threads | [a] Alias: %s | [l] Limit(%d) | [f] Freeze: %s",
-                             f_info, interval, show_thread_alias ? "ON" : "OFF", display_limit, frozen ? "ON" : "OFF");
+                    snprintf(right, sizeof(right), "%s[r] Refresh=%.1fs | [c] CPU | [s] Storage | [n] Net | [t] Threads | [a] Alias: %s | [h] Hide Sys: %s | [l] Limit(%d) | [f] Freeze: %s",
+                             f_info, interval, show_thread_alias ? "ON" : "OFF", hide_system ? "ON" : "OFF", display_limit, frozen ? "ON" : "OFF");
                 }
                 
                 int pad = cols - (int)strlen(left) - (int)strlen(right);
@@ -1381,6 +1382,8 @@ int main(int argc, char **argv) {
                         filtered_idx = (int *)malloc(filt_cap * sizeof(int));
                         for (size_t fi = 0; fi < view_list->len; fi++) {
                             const sample_t *fc = &view_list->data[fi];
+                            // Hide system processes/threads (names in [brackets])
+                            if (hide_system && fc->cmd[0] == '[') continue;
                             if (strlen(filter_str) > 0) {
                                 char fpbuf[32];
                                 snprintf(fpbuf, sizeof(fpbuf), "%d", fc->tgid);
@@ -1634,6 +1637,7 @@ int main(int argc, char **argv) {
                     if (c == 'f' || c == 'F') { frozen = !frozen; dirty = 1; }
                     if (c == 't' || c == 'T') { show_tree = !show_tree; mode = MODE_PROCESS; dirty = 1; }
                     if (c == 'a' || c == 'A') { show_thread_alias = !show_thread_alias; dirty = 1; }
+                    if (c == 'h' || c == 'H') { hide_system = !hide_system; cursor_pos = 0; scroll_offset = 0; dirty = 1; }
                     if (c == 'n' || c == 'N') { mode = MODE_NETWORK; dirty = 1; }
                     if (c == 'c' || c == 'C') { mode = MODE_PROCESS; dirty = 1; }
                     if (c == 's' || c == 'S') { mode = MODE_STORAGE; dirty = 1; }
