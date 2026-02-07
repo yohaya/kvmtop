@@ -78,6 +78,7 @@ typedef struct {
     double w_mib;
 
     char cmd[CMD_MAX];
+    char comm[CMD_MAX]; // thread's own comm name (from /proc/task/TID/comm)
 } sample_t;
 
 typedef struct {
@@ -706,7 +707,19 @@ static int collect_samples(vec_t *out, const pid_t *filter_pids, size_t filter_n
                 s.pid = tid; 
                 s.tgid = pid;
                 s.key = make_key(tid);
-                snprintf(s.cmd, sizeof(s.cmd), "%s", cmd); 
+                snprintf(s.cmd, sizeof(s.cmd), "%s", cmd);
+
+                // Read thread's own comm name
+                {
+                    char comm_path[PATH_MAX], comm_buf[256];
+                    ssize_t comm_n;
+                    snprintf(comm_path, sizeof(comm_path), "/proc/%d/task/%d/comm", pid, tid);
+                    if (read_small_file(comm_path, comm_buf, sizeof(comm_buf), &comm_n) == 0 && comm_n > 0) {
+                        sanitize_cmd(s.comm, comm_buf, (size_t)comm_n);
+                    } else {
+                        snprintf(s.comm, sizeof(s.comm), "%d", tid);
+                    }
+                }
 
                 char io_path[PATH_MAX], stat_path[PATH_MAX];
                 snprintf(io_path, sizeof(io_path), "/proc/%d/task/%d/io", pid, tid);
@@ -723,10 +736,11 @@ static int collect_samples(vec_t *out, const pid_t *filter_pids, size_t filter_n
         } else {
             // Fallback
             sample_t s; memset(&s, 0, sizeof(s));
-            s.pid = pid; 
+            s.pid = pid;
             s.tgid = pid;
             s.key = make_key(pid);
             snprintf(s.cmd, sizeof(s.cmd), "%s", cmd);
+            snprintf(s.comm, sizeof(s.comm), "%s", cmd);
 
             char io_path[PATH_MAX], stat_path[PATH_MAX];
             snprintf(io_path, sizeof(io_path), "/proc/%d/io", pid);
@@ -952,6 +966,7 @@ int main(int argc, char **argv) {
     int scroll_offset = 0;
     int cursor_pos = 0;
     int show_tree = 0;
+    int show_thread_alias = 0;
     int frozen = 0;
     char filter_str[64] = {0};
     int in_filter_mode = 0;
@@ -1162,8 +1177,8 @@ int main(int argc, char **argv) {
                     char f_info[40] = "";
                     if (strlen(filter_str) > 0) snprintf(f_info, sizeof(f_info), "Filter: %s | ", filter_str);
                     
-                    snprintf(right, sizeof(right), "%s[r] Refresh=%.1fs | [c] CPU | [s] Storage | [n] Net | [t] Tree | [l] Limit(%d) | [f] Freeze: %s",
-                             f_info, interval, display_limit, frozen ? "ON" : "OFF");
+                    snprintf(right, sizeof(right), "%s[r] Refresh=%.1fs | [c] CPU | [s] Storage | [n] Net | [t] Threads | [a] Alias: %s | [l] Limit(%d) | [f] Freeze: %s",
+                             f_info, interval, show_thread_alias ? "ON" : "OFF", display_limit, frozen ? "ON" : "OFF");
                 }
                 
                 int pad = cols - (int)strlen(left) - (int)strlen(right);
@@ -1449,11 +1464,8 @@ int main(int argc, char **argv) {
                             if (!is_highlighted) printf(CLR_TREE);
                             printf("%s", conn);
                             if (!is_highlighted) printf(CLR_RESET);
-                            if (is_highlighted) {
-                                fprint_trunc(stdout, c->cmd, cmdw - 3);
-                            } else {
-                                fprint_trunc(stdout, c->cmd, cmdw - 3);
-                            }
+                            const char *thread_label = (show_thread_alias && c->comm[0]) ? c->comm : c->cmd;
+                            fprint_trunc(stdout, thread_label, cmdw - 3);
                         } else {
                             printf("%*s %-*s %*s %*.0f %*.0f %*.0f %*.0f %*.0f %*.*f %*.*f %*.*f %*.*f %*c ",
                                 pidw, pidbuf, userw, c->user, uptimew, uptime_buf,
@@ -1492,14 +1504,21 @@ int main(int argc, char **argv) {
                     // Show process count / scroll info below totals, right-aligned
                     {
                         char showbuf[128];
-                        if (filtered_count > visible_rows) {
-                            int end_row = scroll_offset + visible_rows;
-                            if (end_row > filtered_count) end_row = filtered_count;
-                            snprintf(showbuf, sizeof(showbuf), "Showing %d-%d of %d%s",
-                                scroll_offset + 1, end_row, filtered_count, show_tree ? " (tree)" : "");
-                        } else {
-                            snprintf(showbuf, sizeof(showbuf), "Showing %d%s",
-                                filtered_count, show_tree ? " (tree)" : "");
+                        {
+                            char mode_tag[64] = "";
+                            if (show_tree && show_thread_alias) snprintf(mode_tag, sizeof(mode_tag), " (threads/alias)");
+                            else if (show_tree) snprintf(mode_tag, sizeof(mode_tag), " (threads)");
+                            else if (show_thread_alias) snprintf(mode_tag, sizeof(mode_tag), " (alias)");
+
+                            if (filtered_count > visible_rows) {
+                                int end_row = scroll_offset + visible_rows;
+                                if (end_row > filtered_count) end_row = filtered_count;
+                                snprintf(showbuf, sizeof(showbuf), "Showing %d-%d of %d%s",
+                                    scroll_offset + 1, end_row, filtered_count, mode_tag);
+                            } else {
+                                snprintf(showbuf, sizeof(showbuf), "Showing %d%s",
+                                    filtered_count, mode_tag);
+                            }
                         }
                         printf(CLR_SCROLLINFO "%*s" CLR_RESET, cols, showbuf);
                     }
@@ -1614,6 +1633,7 @@ int main(int argc, char **argv) {
                     if (c == 'q' || c == 'Q') goto cleanup;
                     if (c == 'f' || c == 'F') { frozen = !frozen; dirty = 1; }
                     if (c == 't' || c == 'T') { show_tree = !show_tree; mode = MODE_PROCESS; dirty = 1; }
+                    if (c == 'a' || c == 'A') { show_thread_alias = !show_thread_alias; dirty = 1; }
                     if (c == 'n' || c == 'N') { mode = MODE_NETWORK; dirty = 1; }
                     if (c == 'c' || c == 'C') { mode = MODE_PROCESS; dirty = 1; }
                     if (c == 's' || c == 'S') { mode = MODE_STORAGE; dirty = 1; }
