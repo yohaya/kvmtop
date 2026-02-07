@@ -966,7 +966,7 @@ int main(int argc, char **argv) {
         sleep(2);
     }
 
-    double interval = 5.0;
+    double interval = 2.0;
     int display_limit = 9999;
     int scroll_offset = 0;
     int cursor_pos = 0;
