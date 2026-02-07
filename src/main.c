@@ -1275,7 +1275,7 @@ int main(int argc, char **argv) {
                         default: qsort(curr_net.data, curr_net.len, sizeof(net_iface_t), cmp_net_rx); break;
                     }
 
-                    int namew=16, statw=10, speedw=8, ratew=12, pktw=12, errw=10, vmidw=6;
+                    int namew=16, statw=10, speedw=10, ratew=12, pktw=12, errw=10, vmidw=6;
                     int fixed_net = namew+1+statw+1+speedw+1+ratew+1+ratew+1+pktw+1+pktw+1+errw+1+errw+1+vmidw+1;
                     int vmnamew = cols - fixed_net;
                     if (vmnamew < 8) vmnamew = 8;
