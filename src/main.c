@@ -1221,8 +1221,12 @@ int main(int argc, char **argv) {
                 printf("\033[2J\033[H"); 
                 int cols = get_term_cols();
                 
-                char left[128], right[256];
-                snprintf(left, sizeof(left), "kvmtop %s", KVM_VERSION);
+                char left[256], right[256];
+                {
+                    char hostname[128] = "";
+                    gethostname(hostname, sizeof(hostname));
+                    snprintf(left, sizeof(left), "kvmtop %s - %s", KVM_VERSION, hostname);
+                }
                 
                 if (in_filter_mode) {
                     snprintf(right, sizeof(right), "FILTER: %s_", filter_str);
